@@ -55,7 +55,8 @@ createApp({
       return total
     })
     const selected = ref([])  // array of selected task IDs
-    const viewMode = ref('grid')  // 'grid' | 'list'
+    const savedMode = localStorage.getItem('dl_view_mode')
+    const viewMode = ref(savedMode === 'list' ? 'list' : 'grid')  // 'grid' | 'list'
     const pageSize = ref(36)
     const page = ref(1)
     const selectedCount = computed(() => selected.value.length)
@@ -124,6 +125,7 @@ createApp({
     }
     function toggleViewMode() {
       viewMode.value = viewMode.value === 'grid' ? 'list' : 'grid'
+      localStorage.setItem('dl_view_mode', viewMode.value)
     }
     async function batchRetry() {
       const ids = [...selected.value]

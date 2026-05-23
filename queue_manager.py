@@ -144,7 +144,18 @@ def cleanup_finished():
                        speed="", segments="", error="")
             print(f"[恢复] {tid}: 重置 downloading → waiting")
         
-        # 转移中 → 重新启动转移
+        # 转移中且已完成复制（move=done）→ 检查 final_path 并标记完成
+        elif t["stage"] == "moving" and t.get("move_speed") == "done":
+            fp = t.get("final_path", "")
+            if fp and Path(fp).exists():
+                update_task(tid, stage="completed", progress=100)
+                print(f"[恢复] {tid}: 转移已完成，标记完成")
+            else:
+                # 没有 final_path 或文件不存在，重新转移
+                update_task(tid, stage="moving", progress=0, move_speed="", move_elapsed="")
+                print(f"[恢复] {tid}: 重新启动转移")
+        
+        # 转移中（未完成）→ 重新启动转移
         elif t["stage"] == "moving" and not t.get("move_speed") == "done":
             cfg = get_download_config()
             download_dir = cfg.get("download_dir", "")
