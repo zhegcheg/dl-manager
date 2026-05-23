@@ -25,6 +25,11 @@ main_app.add_middleware(
 main_app.include_router(api_app)
 
 web_dir = os.path.join(os.path.dirname(__file__), "web")
+# NAS 媒体目录（必须在 / 之前挂载）
+nas_dir = "/mnt/fn-nas-imovie"
+if os.path.exists(nas_dir):
+    main_app.mount("/nas", StaticFiles(directory=nas_dir, html=False), name="nas")
+
 if os.path.exists(web_dir):
     main_app.mount("/", StaticFiles(directory=web_dir, html=True), name="web")
 

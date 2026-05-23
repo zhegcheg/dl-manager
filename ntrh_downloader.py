@@ -131,15 +131,16 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
                 mp4_file = flat_mp4
 
         if exit_code == 0 and mp4_file and mp4_file.stat().st_size > 0:
+            # 先标记文件位置，再开始转移
             update_task(task_id, status="completed", stage="completed",
                       progress=100, file=str(mp4_file))
-            # 转移到 NAS 媒体库
+            # 转移到 NAS 媒体库（转移过程中 stage 会被 mover 改为 moving）
             from task_db import get_task
             t = get_task(task_id)
             if t:
-                ok, _ = move_to_media_library(task_id, str(mp4_file), t["name"] + ".mp4")
-                if ok:
-                    update_task(task_id, status="completed", stage="completed", progress=100)
+                # 启动异步转移到 NAS（不阻塞）
+                update_task(task_id, stage="moving", progress=0, move_speed="", move_elapsed="")
+                move_to_media_library(task_id, str(mp4_file), t["name"] + ".mp4")
             # 清理空的任务目录和嵌套子目录
             if task_dir.exists():
                 shutil.rmtree(task_dir, ignore_errors=True)

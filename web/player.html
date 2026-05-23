@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DL Player</title>
+  <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #000; display: flex; flex-direction: column; align-items: center; height: 100vh; overflow: hidden; }
@@ -11,21 +12,40 @@
     .nav a { color: #ff6b9d; text-decoration: none; font-size: 14px; }
     .nav a:hover { text-decoration: underline; }
     .nav .title { color: #aaa; font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    video { max-width: 100%; max-height: calc(100vh - 52px); }
+    #player-wrap { width: 100%; max-width: 1200px; flex: 1; display: flex; align-items: center; justify-content: center; }
+    .video-js { width: 100%; height: 100%; }
+    .loading { color: #888; font-size: 14px; padding: 40px; }
   </style>
 </head>
 <body>
   <div class="nav">
     <a href="/">← DL Manager</a>
-    <span class="title" id="filename"></span>
+    <span class="title" id="filename">加载中...</span>
   </div>
-  <video id="player" controls autoplay></video>
+  <div id="player-wrap"></div>
+
+  <script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
   <script>
     const params = new URLSearchParams(location.search)
+    const id = params.get('id')
     const file = params.get('file')
-    if (file) {
+    const wrap = document.getElementById('player-wrap')
+    
+    function play(src, type) {
+      wrap.innerHTML = '<video-js id="player" class="video-js vjs-big-play-centered" controls preload="auto"><source src="' + src + '" type="' + type + '"></video-js>'
+      videojs('player', { controls: true, fluid: true })
+    }
+    
+    if (id) {
+      document.getElementById('filename').textContent = '播放: ' + id
+      play('/api/media/by-id/' + id, 'video/mp4')
+    } else if (file) {
       document.getElementById('filename').textContent = decodeURIComponent(file)
-      document.getElementById('player').src = '/api/media/' + encodeURIComponent(file)
+      var isM3u8 = file.endsWith('.m3u8')
+      play('/api/media/' + encodeURIComponent(file), isM3u8 ? 'application/x-mpegURL' : 'video/mp4')
+    } else {
+      document.getElementById('filename').textContent = '缺少参数'
+      wrap.innerHTML = '<div class="loading">请在地址栏添加 ?id=任务ID</div>'
     }
   </script>
 </body>

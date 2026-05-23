@@ -1,7 +1,7 @@
 """
 FastAPI HTTP API
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -288,10 +288,67 @@ def batch_update_config(body: dict):
 
 MEDIA_DIR = Path("/mnt/fn-nas-imovie")
 
+@app.get("/api/media/by-id/{task_id}")
+@app.get("/api/media/by-id/{task_id}")
+@app.head("/api/media/by-id/{task_id}")
+def serve_media_by_id(task_id: str, request: Request):
+    """根据任务 ID 从 NAS 流式传输视频文件"""
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    fp = task.get("final_path", "") or task.get("file", "")
+    if not fp:
+        raise HTTPException(404, "File path not found")
+    file_path = Path(fp)
+    if not file_path.exists():
+        raise HTTPException(404, "File not found")
+    # 直接用 FileResponse 流式传输（不支持 Range 但可播放）
+    import os as _os
+    stat_result = file_path.stat()
+    file_size = stat_result.st_size
+    range_header = request.headers.get("range")
+    
+    start, end = 0, file_size - 1
+    status_code = 200
+    
+    if range_header:
+        status_code = 206
+        try:
+            parts = range_header.replace("bytes=", "").split("-")
+            start = int(parts[0]) if parts[0] else 0
+            end = int(parts[1]) if len(parts) > 1 and parts[1] else file_size - 1
+        except:
+            start, end = 0, file_size - 1
+    
+    length = end - start + 1
+    
+    def file_iterator():
+        with _os.fdopen(_os.open(str(file_path), _os.O_RDONLY), "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk_size = min(65536, remaining)
+                data = f.read(chunk_size)
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+    
+    headers = {
+        "Content-Type": "video/mp4",
+        "Content-Length": str(length),
+        "Content-Disposition": "inline",
+        "Accept-Ranges": "bytes",
+    }
+    if status_code == 206:
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+    
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(file_iterator(), status_code=status_code, headers=headers)
+
 @app.get("/api/media/{filename:path}")
 def serve_media(filename: str):
     """从 NAS 提供视频文件（支持 Range 请求用于拖拽播放）"""
-    # 安全检查：禁止路径穿越
     if ".." in filename or filename.startswith("/"):
         raise HTTPException(403, "Access denied")
     file_path = MEDIA_DIR / filename

@@ -48,11 +48,12 @@
     <div class="filter-bar">
       <button class="filter-btn" :class="{active: filter==null}" @click="filter=null">全部</button>
       <button class="filter-btn" :class="{active: filter=='waiting'}" @click="filter='waiting'">等待([[ waitingCount ]])</button>
-      <button class="filter-btn" :class="{active: filter=='downloading'}" @click="filter='downloading'">下载中</button>
-      <button class="filter-btn" :class="{active: filter=='merging'}" @click="filter='merging'">合并中</button>
-      <button class="filter-btn" :class="{active: filter=='moving'}" @click="filter='moving'">转移中</button>
-      <button class="filter-btn" :class="{active: filter=='completed'}" @click="filter='completed'">已完成</button>
-      <button class="filter-btn" :class="{active: filter=='failed'}" @click="filter='failed'">失败</button>
+      <button class="filter-btn" :class="{active: filter=='downloading'}" @click="filter='downloading'">下载中([[ downloadingCount ]])</button>
+      <button class="filter-btn" :class="{active: filter=='merging'}" @click="filter='merging'">合并中([[ mergingCount ]])</button>
+      <button class="filter-btn" :class="{active: filter=='moving'}" @click="filter='moving'">转移中([[ movingCount ]])</button>
+      <button class="filter-btn" :class="{active: filter=='completed'}" @click="filter='completed'">已完成([[ completedCount ]])</button>
+      <button class="filter-btn" :class="{active: filter=='failed'}" @click="filter='failed'">失败([[ failedCount ]])</button>
+      <button class="filter-btn" :class="{active: filter=='stopped'}" @click="filter='stopped'">已暂停([[ stoppedCount ]])</button>
     </div>
 
     <div class="task-grid" v-if="viewMode==='grid' && filteredTasks.length">
@@ -76,15 +77,15 @@
         </div>
         <div class="progress-bar" v-if="t.stage === 'downloading' || t.stage === 'merging' || t.stage === 'moving'">
           <div class="progress-fill" :class="t.stage" :style="{width: Math.min(t.progress || 0, 100)+'%'}"></div>
-          <div class="progress-text">[[ Math.round(t.progress || 0) ]]% <span v-if="t.speed" style="margin-left:6px;font-size:10px;opacity:0.9;">[[ t.speed ]]</span></div>
+          <div class="progress-text">[[ Math.round(t.progress || 0) ]]<span v-if="t.stage==='downloading' && t.speed" style="margin-left:6px;font-size:10px;opacity:0.9;"> [[ t.speed ]]</span><span v-if="t.stage==='merging'">% 🔄 合并中</span><span v-if="t.stage==='moving'">% 📤 [[ t.move_speed || '' ]]</span></div>
         </div>
         <div class="meta">
           <div>
             <span v-if="t.segments && t.stage==='downloading'">[[ t.segments ]] 片</span>
             <span v-if="t.chunks && t.stage==='downloading'"> [[ t.chunks ]] 块</span>
-            <span v-if="t.move_speed && t.move_speed!=='done' && t.stage==='moving'" class="speed">📤 [[ t.move_speed ]]</span>
             <span v-if="t.move_elapsed && t.stage==='moving'"> [[ t.move_elapsed ]]</span>
-            <span v-if="t.stage==='completed'">✅ 已完成</span>
+            <span v-if="t.stage==='completed'">✅ 已完成
+              <a :href="'/player.html?id=' + t.id" target="_blank" style="color:#60a5fa;text-decoration:none;margin-left:4px;font-size:12px;" title="播放">▶ 播放</a></span>
             <span v-if="t.stage==='failed'">❌ [[ t.error ]]</span>
           </div>
       </div>
@@ -102,14 +103,14 @@
         <div class="list-progress" v-if="t.stage==='downloading' || t.stage==='merging' || t.stage==='moving'">
           <div class="progress-bar" style="height:14px;margin:0;width:120px;">
             <div class="progress-fill" :class="t.stage" :style="{width: Math.min(t.progress || 0, 100)+'%'}"></div>
-            <div class="progress-text" style="font-size:10px;">[[ Math.round(t.progress || 0) ]]%</div>
+            <div class="progress-text" style="font-size:10px;">[[ Math.round(t.progress || 0) ]]<span v-if="t.stage==='merging'">% 🔄合并</span><span v-else-if="t.stage==='moving'">% 📤</span><span v-else>%</span></div>
           </div>
         </div>
-        <span v-if="t.speed" style="font-size:11px;color:#888;white-space:nowrap;">[[ t.speed ]]</span>
+        <span v-if="t.speed && t.stage==='downloading'" style="font-size:11px;color:#888;white-space:nowrap;">[[ t.speed ]]</span>
         <span v-if="t.segments && t.stage==='downloading'" style="font-size:10px;color:#666;white-space:nowrap;">[[ t.segments ]]片</span>
-        <span v-if="t.move_speed && t.move_speed!=='done' && t.stage==='moving'" style="font-size:11px;color:#fbbf24;white-space:nowrap;">📤[[ t.move_speed ]]</span>
+        <span v-if="t.move_speed && t.move_speed!=='done' && t.stage==='moving'" style="font-size:11px;color:#fbbf24;white-space:nowrap;">[[ t.move_speed ]]</span>
         <span v-if="t.stage==='completed'" style="font-size:11px;color:#4ade80;white-space:nowrap;">✅已完成
-          <a :href="'/player?file=' + encodeURIComponent(t.final_path ? t.final_path.split('/').pop() : (t.file || '').split('/').pop())" target="_blank" style="color:#60a5fa;text-decoration:none;margin-left:4px;" title="播放">▶ 播放</a></span>
+          <a :href="'/player.html?id=' + t.id" target="_blank" style="color:#60a5fa;text-decoration:none;margin-left:4px;" title="播放">▶ 播放</a></span>
         <span v-if="t.stage==='failed'" style="font-size:11px;color:#f87171;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px;" :title="t.error">❌[[ t.error ]]</span>
         <div class="list-actions">
           <button v-if="t.stage === 'waiting' || t.stage === 'stopped'" class="btn sm" style="border-color:#60a5fa;color:#60a5fa;padding:2px 8px;font-size:11px;" @click="startTask(t)">▶</button>
@@ -121,6 +122,19 @@
     </div>
     <div class="empty" v-if="viewMode==='grid' && !filteredTasks.length">暂无任务</div>
     <div class="empty" v-if="viewMode==='list' && !filteredTasks.length">暂无任务</div>
+    <div class="pagination" v-if="showPagination" style="display:flex;align-items:center;justify-content:center;gap:12px;padding:20px 0;font-size:13px;color:#888;">
+      <button class="btn sm" @click="goPage(page-1)" :disabled="page<=1" style="padding:4px 12px;">‹ 上一页</button>
+      <span style="color:#e0e0e0;">第 [[ page ]] / [[ totalPages ]] 页</span>
+      <button class="btn sm" @click="goPage(page+1)" :disabled="page>=totalPages" style="padding:4px 12px;">下一页 ›</button>
+      <span style="margin-left:12px;color:#666;">每页</span>
+      <select v-model="pageSize" @change="setPageSize(pageSize)" style="background:#1a1a1a;color:#e0e0e0;border:1px solid #333;border-radius:4px;padding:4px 8px;font-size:13px;">
+        <option :value="24">24</option>
+        <option :value="36">36</option>
+        <option :value="72">72</option>
+        <option :value="108">108</option>
+      </select>
+      <span style="color:#666;">条</span>
+    </div>
   </div>
 
   <!-- 订阅源管理 -->
@@ -265,7 +279,6 @@
       <div class="log-box" ref="logBox" v-text="logContent || '等待日志...'"></div>
     </div>
   </div>
-</div>
 </div>
 
 

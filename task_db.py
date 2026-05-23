@@ -118,7 +118,7 @@ def get_task(task_id: str) -> Optional[dict]:
     conn.close()
     return dict(row) if row else None
 
-def list_tasks(status: str = None, limit: int = 100) -> list:
+def list_tasks(status: str = None, limit: int = 500) -> list:
     conn = get_db()
     if status:
         rows = conn.execute("SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT ?",

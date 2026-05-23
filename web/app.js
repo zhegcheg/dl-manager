@@ -21,10 +21,27 @@ createApp({
     let pollTimer = null
     let logSource = null
 
-    const activeCount = computed(() => tasks.value.filter(t => ['downloading','merging','moving'].includes(t.stage)).length)
-    const completedCount = computed(() => tasks.value.filter(t => t.stage === 'completed').length)
-    const failedCount = computed(() => tasks.value.filter(t => t.stage === 'failed').length)
-    const waitingCount = computed(() => tasks.value.filter(t => t.stage === 'waiting').length)
+    const counts = computed(() => {
+      let a=0,c=0,f=0,w=0,s=0,d=0,m=0,mv=0
+      for (const t of tasks.value) {
+        if (t.stage==='downloading') d++
+        else if (t.stage==='merging') m++
+        else if (t.stage==='moving') mv++
+        else if (t.stage==='completed') c++
+        else if (t.stage==='failed') f++
+        else if (t.stage==='waiting') w++
+        else if (t.stage==='stopped') s++
+      }
+      return {active:d+m+mv, completed:c, failed:f, waiting:w, stopped:s, downloading:d, merging:m, moving:mv}
+    })
+    const activeCount = computed(() => counts.value.active)
+    const completedCount = computed(() => counts.value.completed)
+    const failedCount = computed(() => counts.value.failed)
+    const waitingCount = computed(() => counts.value.waiting)
+    const stoppedCount = computed(() => counts.value.stopped)
+    const downloadingCount = computed(() => counts.value.downloading)
+    const mergingCount = computed(() => counts.value.merging)
+    const movingCount = computed(() => counts.value.moving)
     const totalSpeed = computed(() => {
       let total = 0
       for (const t of tasks.value) {
@@ -39,23 +56,33 @@ createApp({
     })
     const selected = ref([])  // array of selected task IDs
     const viewMode = ref('grid')  // 'grid' | 'list'
+    const pageSize = ref(36)
+    const page = ref(1)
     const selectedCount = computed(() => selected.value.length)
-    const filteredTasks = computed(() => {
+    const allSorted = computed(() => {
       let list = filter.value ? tasks.value.filter(t => t.stage === filter.value) : [...tasks.value]
-      // 排序：下载中 > 合并中 > 转移中 > 其他，同组按创建时间倒序
-      const priority = {downloading:0, merging:1, moving:2}
+      const priority = {downloading:0, merging:1, moving:2, waiting:3, completed:4, failed:5, stopped:6}
       list.sort((a, b) => {
-        const pa = priority[a.stage] ?? 3
-        const pb = priority[b.stage] ?? 3
+        const pa = priority[a.stage] ?? 7
+        const pb = priority[b.stage] ?? 7
         if (pa !== pb) return pa - pb
-        // 同优先级按创建时间倒序
         return (b.created_at || '').localeCompare(a.created_at || '')
       })
       return list
     })
+    const showPagination = computed(() => allSorted.value && allSorted.value.length > pageSize.value)
+    const totalPages = computed(() => allSorted.value ? Math.ceil(allSorted.value.length / pageSize.value) : 1)
+    const filteredTasks = computed(() => {
+      const start = (page.value - 1) * pageSize.value
+      return allSorted.value.slice(start, start + pageSize.value)
+    })
+    // 当筛选或页码改变时，如果当前页超出总页数，回到第一页
+    function goPage(p) { page.value = Math.max(1, Math.min(p, totalPages.value)) }
+    function setPageSize(s) { pageSize.value = s; page.value = 1 }
 
 
     const allSelected = computed(() => filteredTasks.value.length > 0 && filteredTasks.value.every(t => selected.value.includes(t.id)))
+    // 点击全选时只选择当前页的任务
     const canBatchStart = computed(() => filteredTasks.value.some(t => selected.value.includes(t.id) && (t.stage === 'waiting' || t.stage === 'stopped')))
     const canBatchStop = computed(() => filteredTasks.value.some(t => selected.value.includes(t.id) && ['downloading','merging','moving'].includes(t.stage)))
     const canBatchRetry = computed(() => filteredTasks.value.some(t => selected.value.includes(t.id) && t.stage === 'failed'))
@@ -67,9 +94,16 @@ createApp({
     }
     function toggleSelectAll() {
       if (allSelected.value) {
-        selected.value = []
+        // 取消当前页所有
+        filteredTasks.value.forEach(t => {
+          const idx = selected.value.indexOf(t.id)
+          if (idx >= 0) selected.value.splice(idx, 1)
+        })
       } else {
-        selected.value = filteredTasks.value.map(t => t.id)
+        // 选中当前页所有
+        filteredTasks.value.forEach(t => {
+          if (!selected.value.includes(t.id)) selected.value.push(t.id)
+        })
       }
     }
     async function batchStart() {
@@ -305,11 +339,11 @@ createApp({
     })
 
     return { tasks, sources, filter, tab, detailTask, logContent, logBox, pollMsg, polling, starting, schedulerConfig, downloadConfig, newSource, deleteTarget, editingSource,
-             activeCount, completedCount, failedCount, waitingCount, totalSpeed, filteredTasks, stageLabel,
+             activeCount, completedCount, failedCount, waitingCount, stoppedCount, downloadingCount, mergingCount, movingCount, totalSpeed, filteredTasks, stageLabel,
              fetchTasks, fetchSources, fetchScheduler, fetchConfig, pollNow, addSource, editSource, saveSource, toggleSource, delSource, toggleScheduler, updateScheduler,
              deleteTask, confirmDelete, showLog, closeLog,
              configSaved, configSaving, saveDownloadConfig, saveSchedulerConfig, retryTask, startTask, stopTask,
-             selected, selectedCount, allSelected, canBatchStart, canBatchStop, canBatchRetry, viewMode,
+             selected, selectedCount, allSelected, canBatchStart, canBatchStop, canBatchRetry, viewMode, page, pageSize, totalPages, showPagination, goPage, setPageSize,
              toggleSelect, toggleSelectAll, batchStart, batchStop, batchRetry, batchDelete, toggleViewMode }
   }
 }).mount('#app')
