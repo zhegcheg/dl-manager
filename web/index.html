@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DL Manager</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  
+</head>
+<body>
+<div id="app" v-cloak>
+  <div class="header">
+    <h1>🎬 DL Manager</h1>
+    <div class="actions">
+      <button class="btn" @click="tab='tasks'">📋 任务</button>
+      <button class="btn" @click="tab='sources'">📡 订阅源</button>
+      <button class="btn" @click="tab='settings'">⚙ 设置</button>
+    </div>
+  </div>
+  <div class="msg" v-if="pollMsg">[[ pollMsg ]]</div>
+
+  <!-- 任务列表 -->
+  <div v-if="tab==='tasks'">
+    <div class="header" style="padding:0;border:none;margin-bottom:12px;">
+      <div class="stat-row" style="margin:0;">
+        <div class="stat active"><div class="val">[[ activeCount ]]</div><div class="lbl">进行中</div></div>
+        <div class="stat done"><div class="val">[[ completedCount ]]</div><div class="lbl">已完成</div></div>
+        <div class="stat fail"><div class="val">[[ failedCount ]]</div><div class="lbl">失败</div></div>
+        <div class="stat"><div class="val">[[ waitingCount ]]</div><div class="lbl">等待中</div></div>
+      <div class="stat speed" style="margin-left:12px;"><div class="val" style="font-size:28px;color:#4ade80;">[[ totalSpeed.toFixed(1) ]]</div><div class="lbl">总速度 MB/s</div></div>
+      </div>
+      <div class="batch-bar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label style="cursor:pointer;display:flex;align-items:center;gap:4px;font-size:13px;color:#aaa;">
+          <input type="checkbox" :checked="allSelected" @change="toggleSelectAll"> 全选
+        </label>
+        <span style="color:#888;font-size:12px;" v-if="selectedCount">已选 [[ selectedCount ]] 项</span>
+        <button class="btn sm" @click="batchStart" :disabled="!canBatchStart" style="border-color:#4ade80;color:#4ade80;">▶ 批量开始</button>
+        <button class="btn sm" @click="batchStop" :disabled="!canBatchStop" style="border-color:#fbbf24;color:#fbbf24;">⏸ 批量暂停</button>
+        <button class="btn sm" @click="batchRetry" :disabled="!canBatchRetry" style="border-color:#4ade80;color:#4ade80;">🔄 批量重试</button>
+        <button class="btn sm danger" @click="batchDelete" :disabled="!selectedCount" style="border-color:#f87171;color:#f87171;">🗑 批量删除</button>
+        <span style="flex:1"></span>
+        <button class="btn" @click="pollNow" :disabled="polling">🔄 [[ polling ? '轮询中...' : '刷新订阅' ]]</button>
+        <button class="btn sm" @click="toggleViewMode" style="border-color:#888;color:#aaa;font-size:16px;" :title="viewMode==='grid' ? '切换列表' : '切换卡片'">[[ viewMode==='grid' ? '☰' : '▦' ]]</button>
+      </div>
+    </div>
+
+    <div class="filter-bar">
+      <button class="filter-btn" :class="{active: filter==null}" @click="filter=null">全部</button>
+      <button class="filter-btn" :class="{active: filter=='waiting'}" @click="filter='waiting'">等待([[ waitingCount ]])</button>
+      <button class="filter-btn" :class="{active: filter=='downloading'}" @click="filter='downloading'">下载中</button>
+      <button class="filter-btn" :class="{active: filter=='merging'}" @click="filter='merging'">合并中</button>
+      <button class="filter-btn" :class="{active: filter=='moving'}" @click="filter='moving'">转移中</button>
+      <button class="filter-btn" :class="{active: filter=='completed'}" @click="filter='completed'">已完成</button>
+      <button class="filter-btn" :class="{active: filter=='failed'}" @click="filter='failed'">失败</button>
+    </div>
+
+    <div class="task-grid" v-if="viewMode==='grid' && filteredTasks.length">
+      <div class="task-card" v-for="t in filteredTasks" :key="t.id" :class="{selected: selected.includes(t.id)}">
+        <div class="top">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <input type="checkbox" :checked="selected.includes(t.id)" @change="toggleSelect(t)" style="accent-color:#ff6b9d;">
+            <div class="name">[[ t.name ]]</div>
+          </div>
+          <div class="id">[[ t.id ]]</div>
+        </div>
+        <div class="stage-row">
+          <span class="stage" :class="t.stage">[[ stageLabel(t.stage) ]]</span>
+          <span v-if="t.retry_count > 0" style="font-size:11px;color:#888;">重试 [[ t.retry_count ]]/3</span>
+          <div class="task-actions">
+            <button v-if="t.stage === 'waiting' || t.stage === 'stopped'" class="btn sm" style="border-color:#60a5fa;color:#60a5fa;" @click="startTask(t)" title="开始">▶ 开始</button>
+            <button v-if="t.stage === 'failed'" class="btn sm" style="border-color:#4ade80;color:#4ade80;" @click="retryTask(t)" title="重试">🔄 重试</button>
+            <button v-if="t.stage === 'downloading' || t.stage === 'merging' || t.stage === 'moving'" class="btn sm" style="border-color:#fbbf24;color:#fbbf24;" @click="stopTask(t)" title="暂停">⏸ 暂停</button>
+            <button class="btn danger sm" @click="deleteTask(t)" title="删除">🗑 删除</button>
+          </div>
+        </div>
+        <div class="progress-bar" v-if="t.stage === 'downloading' || t.stage === 'merging' || t.stage === 'moving'">
+          <div class="progress-fill" :class="t.stage" :style="{width: Math.min(t.progress || 0, 100)+'%'}"></div>
+          <div class="progress-text">[[ Math.round(t.progress || 0) ]]% <span v-if="t.speed" style="margin-left:6px;font-size:10px;opacity:0.9;">[[ t.speed ]]</span></div>
+        </div>
+        <div class="meta">
+          <div>
+            <span v-if="t.segments && t.stage==='downloading'">[[ t.segments ]] 片</span>
+            <span v-if="t.chunks && t.stage==='downloading'"> [[ t.chunks ]] 块</span>
+            <span v-if="t.move_speed && t.move_speed!=='done' && t.stage==='moving'" class="speed">📤 [[ t.move_speed ]]</span>
+            <span v-if="t.move_elapsed && t.stage==='moving'"> [[ t.move_elapsed ]]</span>
+            <span v-if="t.stage==='completed'">✅ 已完成</span>
+            <span v-if="t.stage==='failed'">❌ [[ t.error ]]</span>
+          </div>
+      </div>
+    </div>
+
+    </div>
+
+    <!-- 列表视图 -->
+    <div class="task-list" v-if="viewMode==='list' && filteredTasks.length">
+      <div class="list-row" v-for="t in filteredTasks" :key="t.id" :class="{selected: selected.includes(t.id)}">
+        <input type="checkbox" :checked="selected.includes(t.id)" @change="toggleSelect(t)" style="accent-color:#ff6b9d;">
+        <div class="list-name" :title="t.name">[[ t.name ]]</div>
+        <span class="stage" :class="t.stage" style="font-size:11px;padding:2px 8px;white-space:nowrap;">[[ stageLabel(t.stage) ]]</span>
+        <span v-if="t.retry_count > 0" style="font-size:10px;color:#888;white-space:nowrap;">重试[[ t.retry_count ]]/3</span>
+        <div class="list-progress" v-if="t.stage==='downloading' || t.stage==='merging' || t.stage==='moving'">
+          <div class="progress-bar" style="height:14px;margin:0;width:120px;">
+            <div class="progress-fill" :class="t.stage" :style="{width: Math.min(t.progress || 0, 100)+'%'}"></div>
+            <div class="progress-text" style="font-size:10px;">[[ Math.round(t.progress || 0) ]]%</div>
+          </div>
+        </div>
+        <span v-if="t.speed" style="font-size:11px;color:#888;white-space:nowrap;">[[ t.speed ]]</span>
+        <span v-if="t.segments && t.stage==='downloading'" style="font-size:10px;color:#666;white-space:nowrap;">[[ t.segments ]]片</span>
+        <span v-if="t.move_speed && t.move_speed!=='done' && t.stage==='moving'" style="font-size:11px;color:#fbbf24;white-space:nowrap;">📤[[ t.move_speed ]]</span>
+        <span v-if="t.stage==='completed'" style="font-size:11px;color:#4ade80;white-space:nowrap;">✅已完成
+          <a :href="'/player?file=' + encodeURIComponent(t.final_path ? t.final_path.split('/').pop() : (t.file || '').split('/').pop())" target="_blank" style="color:#60a5fa;text-decoration:none;margin-left:4px;" title="播放">▶ 播放</a></span>
+        <span v-if="t.stage==='failed'" style="font-size:11px;color:#f87171;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px;" :title="t.error">❌[[ t.error ]]</span>
+        <div class="list-actions">
+          <button v-if="t.stage === 'waiting' || t.stage === 'stopped'" class="btn sm" style="border-color:#60a5fa;color:#60a5fa;padding:2px 8px;font-size:11px;" @click="startTask(t)">▶</button>
+          <button v-if="t.stage === 'failed'" class="btn sm" style="border-color:#4ade80;color:#4ade80;padding:2px 8px;font-size:11px;" @click="retryTask(t)">🔄</button>
+          <button v-if="t.stage === 'downloading' || t.stage === 'merging' || t.stage === 'moving'" class="btn sm" style="border-color:#fbbf24;color:#fbbf24;padding:2px 8px;font-size:11px;" @click="stopTask(t)">⏸</button>
+          <button class="btn danger sm" style="padding:2px 8px;font-size:11px;" @click="deleteTask(t)">🗑</button>
+        </div>
+      </div>
+    </div>
+    <div class="empty" v-if="viewMode==='grid' && !filteredTasks.length">暂无任务</div>
+    <div class="empty" v-if="viewMode==='list' && !filteredTasks.length">暂无任务</div>
+  </div>
+
+  <!-- 订阅源管理 -->
+  <div v-if="tab==='sources'">
+    <div style="display:flex;align-items:center;margin-bottom:16px;">
+      <button class="btn" @click="tab='tasks'" style="margin-right:12px;">← 返回</button>
+      <h2 style="font-size:16px;color:#ff6b9d;margin:0;">📡 订阅源管理</h2>
+    </div>
+
+    <!-- 添加订阅源 -->
+    <div class="add-source-form">
+      <div class="row">
+        <input v-model="newSource.name" placeholder="订阅源名称">
+        <input v-model="newSource.url" placeholder="页面 URL，如：https://jable.tv/">
+        <select v-model="newSource.feed_type">
+          <option value="jable">Jable 页面</option>
+          <option value="rss">标准 RSS</option>
+        </select>
+        <button class="btn primary" @click="addSource">添加</button>
+      </div>
+    </div>
+
+    <!-- 订阅源列表 -->
+    <div class="sources-header">
+      <span style="color:#888;font-size:13px;">共 [[ sources.length ]] 个订阅源</span>
+    </div>
+    <div class="source-list" v-if="sources.length">
+      <div class="source-card" v-for="s in sources" :key="s.id">
+        <div class="info">
+          <div class="name">[[ s.name ]] <span class="feed-type">[[ s.feed_type ]]</span></div>
+          <div class="url">[[ s.url ]]</div>
+        </div>
+        <div class="actions">
+          <button class="toggle" :class="{on: s.enabled}" @click="toggleSource(s)"></button>
+          <button class="btn sm" @click="editSource(s)">✏️ 编辑</button>
+          <button class="btn danger sm" @click="delSource(s.id)">🗑 删除</button>
+        </div>
+      </div>
+    </div>
+    <div class="empty" v-if="!sources.length">暂无订阅源，请添加</div>
+  </div>
+
+  <!-- 设置 -->
+  <div v-if="tab==='settings'">
+    <div style="display:flex;align-items:center;margin-bottom:16px;">
+      <button class="btn" @click="tab='tasks'" style="margin-right:12px;">← 返回</button>
+      <h2 style="font-size:16px;color:#ff6b9d;margin:0;">⚙ 下载设置</h2>
+    </div>
+
+    <!-- 下载配置 -->
+    <div class="scheduler-config">
+      <div class="item">
+        <label>下载目录</label>
+        <input v-model="downloadConfig.download_dir" placeholder="/home/zhegcheg/imovie/tasks" style="width:300px;">
+      </div>
+      <div class="item">
+        <label>最大并发数 <span style="color:#888;font-size:12px;">(上限10)</span></label>
+        <input v-model="downloadConfig.max_concurrent" placeholder="2" type="number" min="1" max="10" style="width:80px;">
+      </div>
+      <div class="item">
+        <label>每任务线程数 <span style="color:#888;font-size:12px;">(上限16)</span></label>
+        <input v-model="downloadConfig.thread_count" placeholder="8" type="number" min="1" max="16" style="width:80px;">
+      </div>
+      <div class="item">
+        <label>NAS 目标</label>
+        <div style="font-size:12px;color:#888;margin-top:4px;">/mnt/fn-nas-imovie/</div>
+      </div>
+      <div class="item" style="margin-top:8px;">
+        <button class="btn primary" @click="saveDownloadConfig" :disabled="configSaving">💾 [[ configSaving ? '保存中...' : '保存设置' ]]</button>
+        <span style="color:#4ade80;font-size:13px;margin-left:12px;font-weight:500;" v-if="configSaved">✅ [[ configSaved ]]</span>
+      </div>
+    </div>
+
+    <!-- 定时调度配置 -->
+    <div class="scheduler-config">
+      <div class="item">
+        <label>每日执行时间</label>
+        <div>
+          <input v-model="schedulerConfig.rss_cron" placeholder="0 4 * * *" style="width:160px;">
+          <div class="cron-hint">格式: 分 时 日 月 周（如 0 4 * * * = 每天凌晨4点）</div>
+        </div>
+      </div>
+      <div class="item">
+        <label>启用定时轮询</label>
+        <button class="toggle" :class="{on: schedulerConfig.rss_enabled==='true'}" @click="toggleScheduler"></button>
+      </div>
+      <div class="item" style="margin-top:8px;">
+        <button class="btn" @click="saveSchedulerConfig">💾 保存调度</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 删除确认弹窗 -->
+  <div class="overlay" v-if="deleteTarget" @click.self="deleteTarget=null">
+    <div class="panel">
+      <div class="panel-header">
+        <h2>确认删除</h2>
+        <button class="panel-close" @click="deleteTarget=null">×</button>
+      </div>
+      <div class="panel-body">
+        <p style="color:#e0e0e0;margin-bottom:12px;">确定要删除任务 <strong style="color:#ff6b9d">[[ deleteTarget.id ]]</strong> 吗？</p>
+        <p style="color:#888;font-size:13px;" v-if="deleteTarget.stage === 'downloading' || deleteTarget.stage === 'merging' || deleteTarget.stage === 'moving'">⚠ 任务正在运行中，删除前会先停止下载。</p>
+      </div>
+      <div class="panel-footer">
+        <button class="btn" @click="deleteTarget=null">取消</button>
+        <button class="btn danger" @click="confirmDelete">确认删除</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 编辑订阅源弹窗 -->
+  <div class="overlay" v-if="editingSource" @click.self="editingSource=null">
+    <div class="panel">
+      <div class="panel-header">
+        <h2>编辑订阅源</h2>
+        <button class="panel-close" @click="editingSource=null">×</button>
+      </div>
+      <div class="panel-body">
+        <div class="form-row">
+          <label>名称</label>
+          <input v-model="editingSource.name" placeholder="订阅源名称">
+        </div>
+        <div class="form-row">
+          <label>URL</label>
+          <input v-model="editingSource.url" placeholder="页面 URL">
+        </div>
+      </div>
+      <div class="panel-footer">
+        <button class="btn" @click="editingSource=null">取消</button>
+        <button class="btn primary" @click="saveSource">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 日志弹窗 -->
+  <div class="overlay" v-if="detailTask" @click.self="closeLog">
+    <div class="log-panel">
+      <div class="panel-header">
+        <h2 v-if="detailTask" v-text="detailTask.id + ' — ' + stageLabel(detailTask.stage)"></h2>
+        <button class="panel-close" @click="closeLog">×</button>
+      </div>
+      <div class="log-box" ref="logBox" v-text="logContent || '等待日志...'"></div>
+    </div>
+  </div>
+</div>
+</div>
+
+
+  <script src="app.js"></script>
+</body>
+</html>
