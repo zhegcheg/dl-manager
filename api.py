@@ -157,6 +157,10 @@ def remove_task(task_id: str):
     import shutil
     if task_dir.exists():
         shutil.rmtree(task_dir)
+    # 删除扁平化后的 mp4 文件
+    flat_mp4 = Path(get_download_config().get("download_dir", "")) / f"{task_id}.mp4"
+    if flat_mp4.exists():
+        flat_mp4.unlink()
     log_path = get_task_log_path(task_id)
     if log_path.exists():
         log_path.unlink()

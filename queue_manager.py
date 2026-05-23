@@ -125,16 +125,87 @@ def apply_max_concurrent(new_limit: int) -> int:
 
 
 def cleanup_finished():
-    """清理已结束的进程记录，并重置 DB 中卡死的 downloading 任务"""
+    """服务启动时恢复状态：重置卡死任务、恢复合并/转移"""
     with _lock:
         dead = [tid for tid, proc in _running.items() if proc.poll() is not None]
     for tid in dead:
         unregister_download(tid)
     
-    # 服务重启时：所有 status=downloading 的任务视为卡死，重置为 waiting
-    from task_db import list_tasks, update_task
+    from task_db import list_tasks, update_task, get_task, get_download_config
+    from pathlib import Path
+    import shutil
+    
     for t in list_tasks():
+        tid = t["id"]
+        
+        # 下载中 → 重置为 waiting（进程已死）
         if t["status"] == "downloading":
-            update_task(t["id"], status="waiting", stage="waiting", progress=0,
+            update_task(tid, status="waiting", stage="waiting", progress=0,
                        speed="", segments="", error="")
-            print(f"[cleanup] reset stuck task {t['id']} to waiting")
+            print(f"[恢复] {tid}: 重置 downloading → waiting")
+        
+        # 转移中 → 重新启动转移
+        elif t["stage"] == "moving" and not t.get("move_speed") == "done":
+            cfg = get_download_config()
+            download_dir = cfg.get("download_dir", "")
+            mp4_path = Path(download_dir) / f"{tid}.mp4"
+            if mp4_path.exists():
+                from mover import move_to_media_library
+                name = t.get("name", tid) or tid
+                update_task(tid, stage="moving", progress=0, move_speed="", move_elapsed="")
+                move_to_media_library(tid, str(mp4_path), name + ".mp4")
+                print(f"[恢复] {tid}: 重启转移")
+            else:
+                # 本地 mp4 不存在（可能已删除），标记失败
+                update_task(tid, status="failed", stage="failed", error="转移中断：源文件不存在")
+                print(f"[恢复] {tid}: 源文件不存在，标记失败")
+        
+        # 合并中 → 尝试重新合并
+        elif t["stage"] == "merging" or (t["status"] == "failed" and "合并" in t.get("error", "")):
+            from merger import merge_ts_to_mp4
+            cfg = get_download_config()
+            download_dir = cfg.get("download_dir", "")
+            task_dir = Path(download_dir) / tid
+            
+            # 搜索分片目录
+            seg_dir = None
+            for d in [task_dir / "0____", task_dir / tid / "0____"]:
+                if d.exists():
+                    seg_dir = d
+                    break
+            if not seg_dir:
+                for sub in sorted(task_dir.iterdir()):
+                    if sub.is_dir():
+                        check = sub / "0____"
+                        if check.exists():
+                            seg_dir = check
+                            break
+            
+            if seg_dir:
+                ts_files = list(seg_dir.glob("[0-9]*.ts"))
+                if ts_files:
+                    print(f"[恢复] {tid}: 发现 {len(ts_files)} 片，尝试合并")
+                    update_task(tid, stage="merging", progress=0)
+                    ok, result = merge_ts_to_mp4(seg_dir, tid)
+                    if ok:
+                        flat = Path(download_dir) / f"{tid}.mp4"
+                        if flat.exists():
+                            update_task(tid, status="completed", stage="completed", progress=100, file=str(flat))
+                            if task_dir.exists():
+                                shutil.rmtree(task_dir, ignore_errors=True)
+                            print(f"[恢复] {tid}: 合并成功")
+                            
+                            # 合并后尝试转移
+                            name = t.get("name", tid) or tid
+                            from mover import move_to_media_library
+                            update_task(tid, stage="moving", progress=0)
+                            move_to_media_library(tid, str(flat), name + ".mp4")
+                            print(f"[恢复] {tid}: 启动转移")
+                        else:
+                            update_task(tid, status="failed", stage="failed", error=f"合并后文件不存在")
+                    else:
+                        update_task(tid, status="failed", stage="failed", error=f"合并失败: {result}")
+                else:
+                    update_task(tid, status="failed", stage="failed", error="分片不存在")
+            else:
+                update_task(tid, status="failed", stage="failed", error="分片目录不存在")

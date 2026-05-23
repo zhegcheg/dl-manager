@@ -1,7 +1,7 @@
 """
 文件转移逻辑（异步）
 """
-import subprocess
+import os, subprocess
 import time
 import threading
 from pathlib import Path
