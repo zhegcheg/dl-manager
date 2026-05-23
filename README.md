@@ -25,8 +25,28 @@
 
 ## 快速开始
 
-### 前置条件
+### 方式一：Docker 部署（推荐）
 
+```bash
+# 克隆
+git clone https://github.com/zhegcheg/dl-manager.git
+cd dl-manager
+
+# 创建数据目录
+mkdir -p ~/.jable-dl-server
+
+# 启动
+docker compose up -d
+
+# 查看日志
+docker compose logs -f
+```
+
+> 可用 `docker compose restart` 重启，容器配置了 `restart: always`，系统重启后自动启动。
+
+### 方式二：源码直接运行
+
+前置条件：
 - Python 3.10+
 - N_m3u8DL-RE（下载引擎，放到 `/tmp/N_m3u8DL-RE`）
 - 推荐：飞牛 NAS（或任意 CIFS 挂载点）
