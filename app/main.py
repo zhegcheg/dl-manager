@@ -2,6 +2,7 @@
 FastAPI Application Factory
 """
 import os
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -12,6 +13,7 @@ from app.db.database import init
 from app.routers import tasks, sources, config
 from app.services.scheduler import start_scheduler, stop_scheduler
 from app.services.queue import try_start_next, cleanup_finished
+from app.events import broadcast_worker
 
 
 @asynccontextmanager
@@ -22,8 +24,11 @@ async def lifespan(app: FastAPI):
     start_scheduler()
     cleanup_finished()
     try_start_next()
+    # 启动 SSE 事件广播后台任务
+    broadcast_task = asyncio.create_task(broadcast_worker())
     yield
     # shutdown
+    broadcast_task.cancel()
     stop_scheduler()
 
 

@@ -153,6 +153,8 @@ def create_task(task_id: str, name: str, m3u8_url: str, headers: str = "", key: 
                       (key, iv, now, task_id))
             conn.commit()
     conn.close()
+    from app.events import mark_dirty
+    mark_dirty()
     return get_task(task_id)
 
 def get_task(task_id: str) -> Optional[dict]:
@@ -192,6 +194,9 @@ def update_task(task_id: str, reset_retry: bool = False, **fields):
                 conn.execute("UPDATE tasks SET retry_count = 0 WHERE id = ?", (task_id,))
             conn.commit()
             conn.close()
+            # 通知 SSE 事件总线：任务已变更
+            from app.events import mark_dirty
+            mark_dirty()
             return
         except sqlite3.OperationalError as e:
             conn.close()
@@ -205,6 +210,8 @@ def delete_task(task_id: str):
     conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
     conn.commit()
     conn.close()
+    from app.events import mark_dirty
+    mark_dirty()
 
 def get_task_retry(task_id: str) -> int:
     conn = get_db()

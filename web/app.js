@@ -34,6 +34,7 @@ createApp({
     const proxySaving = ref(false)
     let pollTimer = null
     let logSource = null
+    let taskSource = null
 
     const counts = computed(() => {
       let a=0,c=0,f=0,w=0,s=0,d=0,m=0,mv=0
@@ -408,15 +409,31 @@ createApp({
     }
 
     onMounted(() => {
-      fetchTasks()
       fetchSources()
       fetchScheduler()
       fetchConfig()
-      pollTimer = setInterval(fetchTasks, 1000)
+      // 用 SSE 替代轮询：服务器主动推送任务变更
+      function connectTaskEvents() {
+        if (taskSource) { taskSource.close() }
+        const es = new EventSource('/api/tasks/events')
+        taskSource = es
+        es.onmessage = (e) => {
+          try {
+            const data = JSON.parse(e.data)
+            tasks.value = data.list || []
+          } catch(err) {}
+        }
+        es.onerror = () => {
+          // EventSource 会自动重连，这里可以加日志
+          console.warn('[SSE] 连接断开，自动重连中...')
+        }
+      }
+      connectTaskEvents()
     })
     onUnmounted(() => {
       clearInterval(pollTimer)
       if (logSource) logSource.close()
+      if (taskSource) taskSource.close()
     })
 
     return { tasks, sources, filter, tab, detailTask, logContent, logBox, pollMsg, polling, starting, schedulerConfig, downloadConfig, newSource, deleteTarget, editingSource,

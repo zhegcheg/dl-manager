@@ -1,6 +1,7 @@
 """
 任务相关 API 路由
 """
+import json
 import shutil
 import asyncio
 from pathlib import Path
@@ -16,6 +17,7 @@ from app.db.database import (
     reset_task_for_manual_retry, get_download_config,
 )
 from app.services.queue import get_active_downloads, is_downloading, try_start_next
+from app.events import subscribe, unsubscribe
 
 router = APIRouter()
 
@@ -30,6 +32,36 @@ class TaskCreate(BaseModel):
     key: str = ""
     iv: str = ""
     download_dir: str = ""
+
+
+@router.get("/api/tasks/events")
+async def task_events():
+    """SSE 端点：任务变更时推送完整任务列表"""
+    q = await subscribe()
+
+    async def event_generator():
+        try:
+            # 连接时立即推送一次当前任务列表
+            tasks = list_tasks()
+            for t in tasks:
+                t.pop("m3u8_url", None)
+            yield f"data: {json.dumps({'total': len(tasks), 'list': tasks})}\n\n"
+
+            while True:
+                try:
+                    payload = await asyncio.wait_for(q.get(), timeout=30)
+                    yield f"data: {json.dumps(payload)}\n\n"
+                except asyncio.TimeoutError:
+                    # 每 30 秒发送心跳保持连接
+                    yield ": heartbeat\n\n"
+        finally:
+            await unsubscribe(q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
 
 
 @router.get("/api/tasks")
