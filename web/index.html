@@ -272,19 +272,7 @@
     </div>
   </div>
 
-  <!-- 日志弹窗 -->
-  <div class="overlay" v-if="detailTask" @click.self="closeLog">
-    <div class="log-panel">
-      <div class="panel-header">
-        <h2 v-if="detailTask" v-text="detailTask.id + ' — ' + stageLabel(detailTask.stage)"></h2>
-        <button class="panel-close" @click="closeLog">×</button>
-      </div>
-      <div class="log-box" ref="logBox" v-text="logContent || '等待日志...'"></div>
-    </div>
-  </div>
-</div>
-
-
+  <!-- 添加视频弹窗 -->
   <div v-if="showAddModal" class="modal-mask" @click.self="showAddModal=false">
     <div class="modal">
       <div class="modal-title">添加 Jable 视频</div>
@@ -300,6 +288,18 @@
       <div v-if="addMsg" class="form-group" :class="addMsg.indexOf('失败')>=0?'error':'success'">[[ addMsg ]]</div>
     </div>
   </div>
+
+  <!-- 日志弹窗 -->
+  <div class="overlay" v-if="detailTask" @click.self="closeLog">
+    <div class="log-panel">
+      <div class="panel-header">
+        <h2 v-if="detailTask" v-text="detailTask.id + ' — ' + stageLabel(detailTask.stage)"></h2>
+        <button class="panel-close" @click="closeLog">×</button>
+      </div>
+      <div class="log-box" ref="logBox" v-text="logContent || '等待日志...'"></div>
+    </div>
+  </div>
+</div>
 
   <script src="app.js"></script>
 </body>
