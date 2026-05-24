@@ -206,8 +206,12 @@
         <input v-model="downloadConfig.thread_count" placeholder="8" type="number" min="1" max="16" style="width:80px;">
       </div>
       <div class="item">
-        <label>NAS 目标</label>
-        <div style="font-size:12px;color:#888;margin-top:4px;">/mnt/fn-nas-imovie/</div>
+        <label>NAS 目标 <span style="color:#888;font-size:12px;">(下载完成后自动复制到 NAS)</span></label>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <div style="font-size:12px;color:#888;">/mnt/fn-nas-imovie/</div>
+          <button class="toggle" :class="{on: downloadConfig.move_to_nas==='true'}" @click="downloadConfig.move_to_nas = downloadConfig.move_to_nas==='true' ? 'false' : 'true'"></button>
+          <span style="font-size:12px;" :style="{color: downloadConfig.move_to_nas==='true' ? '#4ade80' : '#888'}">[[ downloadConfig.move_to_nas==='true' ? '已启用' : '已关闭' ]]</span>
+        </div>
       </div>
       <div class="item" style="margin-top:8px;">
         <button class="btn primary" @click="saveDownloadConfig" :disabled="configSaving">💾 [[ configSaving ? '保存中...' : '保存设置' ]]</button>

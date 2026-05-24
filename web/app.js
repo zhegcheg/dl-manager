@@ -14,7 +14,7 @@ createApp({
     const polling = ref(false)
     const starting = ref(false)
     const schedulerConfig = ref({rss_cron: '0 4 * * *', rss_enabled: 'true'})
-    const downloadConfig = ref({download_dir: '', temp_dir: '', max_concurrent: '2', thread_count: '8'})
+    const downloadConfig = ref({download_dir: '', temp_dir: '', max_concurrent: '2', thread_count: '8', move_to_nas: 'true'})
     const proxyConfig = ref({enabled: 'false', type: 'http', host: '', port: '7890'})
     const newSource = ref({name:'', url:'', feed_type: 'jable'})
     const deleteTarget = ref(null)
@@ -179,7 +179,7 @@ createApp({
       try { const r = await fetch('/api/config'); const d = await r.json();
         const data = d.data || {}
         schedulerConfig.value = {rss_cron: data.rss_cron || '0 4 * * *', rss_enabled: data.rss_enabled || 'true'}
-        downloadConfig.value = {download_dir: data.download_dir || '', temp_dir: data.temp_dir || '', max_concurrent: data.max_concurrent || '2', thread_count: data.thread_count || '8'}
+        downloadConfig.value = {download_dir: data.download_dir || '', temp_dir: data.temp_dir || '', max_concurrent: data.max_concurrent || '2', thread_count: data.thread_count || '8', move_to_nas: data.move_to_nas || 'true'}
         proxyConfig.value = {enabled: data.enabled || 'false', type: data.type || 'http', host: data.host || '', port: data.port || '7890'}
       } catch(e) {}
     }
@@ -220,7 +220,7 @@ createApp({
       configSaving.value = true
       configSaved.value = ''
       try {
-        const body = { max_concurrent: mc, thread_count: tc }
+        const body = { max_concurrent: mc, thread_count: tc, move_to_nas: downloadConfig.value.move_to_nas }
         if (downloadConfig.value.download_dir) body.download_dir = downloadConfig.value.download_dir
         if (downloadConfig.value.temp_dir) body.temp_dir = downloadConfig.value.temp_dir
         const r = await fetch('/api/config/apply', {

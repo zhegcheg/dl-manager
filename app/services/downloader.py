@@ -217,12 +217,19 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
                         update_task(task_id, status="completed", stage="completed",
                                   progress=100, file=str(final_mp4))
                         
-                        # 启动异步转移到 NAS
-                        t = get_task(task_id)
-                        if t:
-                            update_task(task_id, stage="moving", progress=0, move_speed="", move_elapsed="")
-                            from app.services.mover import move_to_media_library
-                            move_to_media_library(task_id, str(final_mp4), t["name"] + ".mp4")
+                        # 检查是否启用 NAS 转移
+                        cfg_now = get_download_config()
+                        if cfg_now.get("move_to_nas", "true") == "true":
+                            # 启动异步转移到 NAS
+                            t = get_task(task_id)
+                            if t:
+                                update_task(task_id, stage="moving", progress=0, move_speed="", move_elapsed="")
+                                from app.services.mover import move_to_media_library
+                                move_to_media_library(task_id, str(final_mp4), t["name"] + ".mp4")
+                        else:
+                            # 不转移，直接完成
+                            download_thread.set_exit_code(0)
+                            return
                         
                         download_thread.set_exit_code(0)
                         return

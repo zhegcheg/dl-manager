@@ -118,6 +118,10 @@ def init():
         "INSERT OR IGNORE INTO download_config (key, value, updated_at) VALUES (?, ?, ?)",
         ("temp_dir", str(Path.home() / ".jable-dl-server" / "temp"), now)
     )
+    conn.execute(
+        "INSERT OR IGNORE INTO download_config (key, value, updated_at) VALUES (?, ?, ?)",
+        ("move_to_nas", "true", now)
+    )
     # 默认代理配置
     conn.execute(
         "INSERT OR IGNORE INTO proxy_config (key, value, updated_at) VALUES (?, ?, ?)",
@@ -328,12 +332,13 @@ def set_scheduler_config(key: str, value: str):
     conn.close()
 
 def get_download_config() -> dict:
-    """获取下载配置（下载目录、最大并发数、线程数）"""
+    """获取下载配置（下载目录、最大并发数、线程数、NAS转移开关）"""
     defaults = {
         "download_dir": str(Path.home() / ".jable-dl-server" / "tasks"),
         "temp_dir": str(Path.home() / ".jable-dl-server" / "temp"),
         "max_concurrent": "2",
         "thread_count": "8",
+        "move_to_nas": "true",
     }
     conn = get_db()
     rows = conn.execute("SELECT * FROM download_config").fetchall()
