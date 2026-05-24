@@ -54,7 +54,10 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
         "--log-level", "INFO",
         "--auto-select",
         "--ui-language", "zh-CN",
-        "--del-after-done",
+        "--skip-merge",
+        "--download-retry-count", "5",         # 每个分片异常重试5次
+        "--check-segments-count",              # 下载后校验分片数量（默认开）
+        "--use-ffmpeg-concat-demuxer",         # 用 concat demuxer 合并（更快更稳）
     ]
 
     if key:
@@ -168,23 +171,27 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
                     update_task(task_id, status="failed", stage="failed", error=f"下载不完整 ({seg_count}片)，放弃合并")
                     return
                 update_task(task_id, stage="merging", progress=0)
-                ok, result = merge_ts_to_mp4(seg_0dir, task_id)
+                # merger 输出到 seg_0dir.parent（task_dir/task_id/），但检查路径是 task_dir/（差一级）
+                # 先把之前可能存在的输出文件移到正确位置
+                correct_path = task_dir / f"{task_id}.mp4"
+                nested_out = seg_0dir.parent / f"{task_id}.mp4"
+                if not correct_path.exists() and nested_out.exists():
+                    import shutil
+                    shutil.move(str(nested_out), str(correct_path))
+                ok, result = merge_ts_to_mp4(seg_0dir, task_id, correct_path)
                 if ok:
-                    # 移动合并后的文件
                     merged = task_dir / f"{task_id}.mp4"
-                    if merged.exists() and merged.stat().st_size > 0:
+                    flat_path = Path(download_dir) / f"{task_id}.mp4"
+                    if not flat_path.exists() and merged.exists():
+                        import shutil
+                        shutil.move(str(merged), str(flat_path))
+                    if flat_path.exists() and flat_path.stat().st_size > 0:
                         update_task(task_id, status="completed", stage="completed",
-                                  progress=100, file=str(merged))
-                        # 清理嵌套目录（如果有）
-                        if task_dir.exists():
-                            # 转移到 NAS 媒体库
-                            from task_db import get_task
-                            t = get_task(task_id)
-                            if t:
-                                move_to_media_library(task_id, str(merged), t["name"] + ".mp4")
-                            # 清理空的任务目录和嵌套子目录
-                            if task_dir.exists():
-                                shutil.rmtree(task_dir, ignore_errors=True)
+                                  progress=100, file=str(flat_path))
+                        from task_db import get_task
+                        t = get_task(task_id)
+                        if t:
+                            move_to_media_library(task_id, str(flat_path), t["name"] + ".mp4")
                     else:
                         update_task(task_id, status="failed", stage="failed", error=f"合并后文件不存在 (exit={exit_code})")
                 else:

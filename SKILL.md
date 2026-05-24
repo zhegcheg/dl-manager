@@ -36,19 +36,35 @@ metadata:
 | **播放视频** | `/player?file=文件名.mp4` |
 | **GitHub** | https://github.com/zhegcheg/dl-manager |
 
-## 启动服务
+## 服务管理（systemd）
 
 ```bash
-cd ~/.openclaw/workspace/jable-dl-server && python3 server.py
+# 启动服务
+systemctl --user start jable-dl-server.service
+
+# 停止服务
+systemctl --user stop jable-dl-server.service
+
+# 重启服务
+systemctl --user restart jable-dl-server.service
+
+# 查看状态
+systemctl --user status jable-dl-server.service
+
+# 查看日志
+journalctl --user-unit jable-dl-server.service -f
 ```
+
+> ⚠️ 已配置开机自启（`enable`），无需手动启动。
 
 ## 小智自然语言命令
 
 | 主人说 | 小智行动 |
 |--------|---------|
-| `启动 dl 下载服务` | 检查端口 8899，若未运行则后台启动 |
+| `启动 dl 下载服务` | 检查 jable-dl-server.service 状态，若未运行则拉起 |
 | `查看下载任务` | `GET /api/tasks`，汇报统计和进行中任务 |
-| `停止 dl 下载服务` | `kill $(lsof -ti :8899)` |
+| `停止 dl 下载服务` | `systemctl --user stop jable-dl-server.service` |
+| `重启 dl 下载服务` | `systemctl --user restart jable-dl-server.service` |
 | `现在检查订阅` | `POST /api/rss/poll`，汇报新增任务数 |
 | `订阅源列表` | `GET /api/sources` |
 | `添加订阅源 [名称] [URL]` | `POST /api/sources` |

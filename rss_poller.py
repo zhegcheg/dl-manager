@@ -57,8 +57,8 @@ def extract_jable_info(video_url: str) -> dict:
     # 提取 title
     title_match = re.search(r'<title>([^<]+)</title>', html)
     raw_title = title_match.group(1).strip() if title_match else ""
-    # 清理标题：去掉后缀 " - Jable.TV"
-    name = re.sub(r'\s*-\s*Jable\.TV\s*\|\s*[^|]+$', '', raw_title).strip()
+    # 清理标题：去掉后缀 " - Jable.TV..."
+    name = re.sub(r'\s*-\s*Jable\.TV.*$', '', raw_title).strip()
     name = re.sub(r'\s*\|\s*免费高清AV在線看\s*\|\s*J片\s*AV看到飽\s*$', '', name).strip()
     # 去掉特殊字符
     name = re.sub(r'[\/\\\*,:<>"?|]', '', name).strip()

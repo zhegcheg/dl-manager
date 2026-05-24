@@ -18,6 +18,10 @@ createApp({
     const newSource = ref({name:'', url:'', feed_type: 'jable'})
     const deleteTarget = ref(null)
     const editingSource = ref(null)
+    const showAddModal = ref(false)
+    const addUrl = ref('')
+    const adding = ref(false)
+    const addMsg = ref('')
     let pollTimer = null
     let logSource = null
 
@@ -328,6 +332,28 @@ createApp({
       logContent.value = ''
     }
 
+    async function doAddVideo() {
+      if (!addUrl.value || adding.value) return
+      adding.value = true
+      addMsg.value = ''
+      try {
+        const r = await fetch('/api/tasks/from-url', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({url: addUrl.value})
+        })
+        const d = await r.json()
+        if (!r.ok) throw new Error((d.detail || d.message || '添加失败').replace(/^Error:\s*/, ''))
+        addMsg.value = '添加成功！'
+        addUrl.value = ''
+        await fetchTasks()
+        setTimeout(() => { showAddModal.value = false; addMsg.value = '' }, 1500)
+      } catch(e) {
+        addMsg.value = '添加失败: ' + e.message
+      }
+      adding.value = false
+    }
+
     onMounted(() => {
       fetchTasks()
       fetchSources()
@@ -346,6 +372,7 @@ createApp({
              deleteTask, confirmDelete, showLog, closeLog,
              configSaved, configSaving, saveDownloadConfig, saveSchedulerConfig, retryTask, startTask, stopTask,
              selected, selectedCount, allSelected, canBatchStart, canBatchStop, canBatchRetry, viewMode, page, pageSize, totalPages, showPagination, goPage, setPageSize,
-             toggleSelect, toggleSelectAll, batchStart, batchStop, batchRetry, batchDelete, toggleViewMode }
+             toggleSelect, toggleSelectAll, batchStart, batchStop, batchRetry, batchDelete, toggleViewMode,
+             showAddModal, addUrl, adding, addMsg, doAddVideo }
   }
 }).mount('#app')

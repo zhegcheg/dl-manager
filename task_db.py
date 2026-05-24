@@ -167,8 +167,8 @@ def set_task_retry(task_id: str, count: int):
     conn.commit()
     conn.close()
 
-def reset_task_for_retry(task_id: str) -> bool:
-    """Reset task to waiting status and increment retry_count. Returns False if max retries exceeded."""
+def reset_task_for_auto_retry(task_id: str) -> bool:
+    """自动重试：增加 retry_count，上限 3 次，超过则放弃"""
     count = get_task_retry(task_id) + 1
     if count > 3:
         return False
@@ -178,6 +178,17 @@ def reset_task_for_retry(task_id: str) -> bool:
     conn.commit()
     conn.close()
     return True
+
+def reset_task_for_manual_retry(task_id: str):
+    """手动重试：重置 retry_count=0（不受次数限制），返回错误原因供用户参考"""
+    t = get_task(task_id)
+    error_msg = t.get("error", "未知错误") if t else "未知错误"
+    conn = get_db()
+    conn.execute("UPDATE tasks SET status='waiting', stage='waiting', progress=0, speed='', segments='', error='', retry_count=0, updated_at=? WHERE id=?",
+                 (datetime.utcnow().isoformat() + "Z", task_id))
+    conn.commit()
+    conn.close()
+    return error_msg
 
 def get_task_log_path(task_id: str) -> Path:
     log_dir = Path.home() / ".jable-dl-server" / "logs"

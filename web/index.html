@@ -16,6 +16,7 @@
       <button class="btn" @click="tab='tasks'">📋 任务</button>
       <button class="btn" @click="tab='sources'">📡 订阅源</button>
       <button class="btn" @click="tab='settings'">⚙ 设置</button>
+      <button class="btn" @click="showAddModal=true" style="border-color:#ff6b9d;color:#ff6b9d;">➕ 添加视频</button>
     </div>
   </div>
   <div class="msg" v-if="pollMsg">[[ pollMsg ]]</div>
@@ -77,7 +78,7 @@
         </div>
         <div class="progress-bar" v-if="t.stage === 'downloading' || t.stage === 'merging' || t.stage === 'moving'">
           <div class="progress-fill" :class="t.stage" :style="{width: Math.min(t.progress || 0, 100)+'%'}"></div>
-          <div class="progress-text">[[ Math.round(t.progress || 0) ]]<span v-if="t.stage==='downloading' && t.speed" style="margin-left:6px;font-size:10px;opacity:0.9;"> [[ t.speed ]]</span><span v-if="t.stage==='merging'">% 🔄 合并中</span><span v-if="t.stage==='moving'">% 📤 [[ t.move_speed || '' ]]</span></div>
+          <div class="progress-text">[[ Math.round(t.progress || 0) ]]%<span v-if="t.stage==='downloading' && t.speed" style="margin-left:6px;font-size:10px;opacity:0.9;"> [[ t.speed ]]</span><span v-if="t.stage==='merging'"> 🔄 合并中</span><span v-if="t.stage==='moving'"> 📤 [[ t.move_speed || '' ]]</span></div>
         </div>
         <div class="meta">
           <div>
@@ -283,6 +284,22 @@
   </div>
 </div>
 
+
+  <div v-if="showAddModal" class="modal-mask" @click.self="showAddModal=false">
+    <div class="modal">
+      <div class="modal-title">添加 Jable 视频</div>
+      <div class="form-group">
+        <label>视频页面 URL</label>
+        <input type="text" v-model="addUrl" placeholder="https://jable.tv/videos/xxxx/" @keyup.enter="doAddVideo">
+      </div>
+      <div class="form-group hint">直接输入 Jable 视频页面地址，自动抓取标题和 m3u8</div>
+      <div class="modal-actions">
+        <button class="btn sm" @click="showAddModal=false">取消</button>
+        <button class="btn sm" :disabled="!addUrl || adding" @click="doAddVideo" style="border-color:#ff6b9d;color:#ff6b9d;">[[ adding ? '添加中...' : '添加' ]]</button>
+      </div>
+      <div v-if="addMsg" class="form-group" :class="addMsg.indexOf('失败')>=0?'error':'success'">[[ addMsg ]]</div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

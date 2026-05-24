@@ -58,10 +58,6 @@ def try_start_next() -> int:
                 # 重试：重置状态+启动
                 update_task(tid, status="waiting", stage="waiting", progress=0,
                            speed="", segments="", error="", retry_count=retry_count + 1)
-                from ntrh_downloader import start_download
-                proc = start_download(tid, t["m3u8_url"], t["headers"],
-                                      t["key"], t["iv"])
-                register_download(tid, proc)
                 started += 1
             else:
                 # 超过3次，不自动重试，等待人工处理
@@ -185,22 +181,23 @@ def cleanup_finished():
                     seg_dir = d
                     break
             if not seg_dir:
-                for sub in sorted(task_dir.iterdir()):
-                    if sub.is_dir():
-                        check = sub / "0____"
-                        if check.exists():
-                            seg_dir = check
-                            break
+                if task_dir.exists():
+                    for sub in sorted(task_dir.iterdir()):
+                        if sub.is_dir():
+                            check = sub / "0____"
+                            if check.exists():
+                                seg_dir = check
+                                break
             
             if seg_dir:
                 ts_files = list(seg_dir.glob("[0-9]*.ts"))
                 if ts_files:
                     print(f"[恢复] {tid}: 发现 {len(ts_files)} 片，尝试合并")
                     update_task(tid, stage="merging", progress=0)
-                    ok, result = merge_ts_to_mp4(seg_dir, tid)
+                    flat = Path(download_dir) / f"{tid}.mp4"
+                    ok, result = merge_ts_to_mp4(seg_dir, tid, flat)
                     if ok:
-                        flat = Path(download_dir) / f"{tid}.mp4"
-                        if flat.exists():
+                        if flat.exists() and flat.stat().st_size > 0:
                             update_task(tid, status="completed", stage="completed", progress=100, file=str(flat))
                             if task_dir.exists():
                                 shutil.rmtree(task_dir, ignore_errors=True)

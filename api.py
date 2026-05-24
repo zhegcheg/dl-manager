@@ -11,7 +11,7 @@ from pathlib import Path
 
 from task_db import (
     create_task, get_task, list_tasks, update_task, delete_task,
-    get_task_log_path, get_task_dir, reset_task_for_retry,
+    get_task_log_path, get_task_dir, reset_task_for_auto_retry, reset_task_for_manual_retry,
     add_source, list_sources, get_source, update_source, delete_source,
     get_scheduler_config, set_scheduler_config,
     get_download_config, set_download_config
@@ -68,6 +68,21 @@ def create_new_task(body: TaskCreate):
                       body.headers, body.key, body.iv)
     return {"data": [task]}
 
+
+@app.post("/api/tasks/from-url")
+def create_task_from_url(body: dict):
+    """只提供 video_url，自动抓取页面标题和 m3u8，生成任务"""
+    from rss_poller import extract_jable_info
+    video_url = body.get("url") or body.get("video_url")
+    if not video_url:
+        raise HTTPException(400, "url or video_url required")
+    info = extract_jable_info(video_url)
+    if not info or not info.get("m3u8_url"):
+        raise HTTPException(502, f"无法从页面提取 m3u8: {video_url}")
+    task = create_task(info["id"], info["name"], info["m3u8_url"],
+                      info.get("headers", ""), info.get("key", ""), info.get("iv", ""))
+    return {"data": [task]}
+
 @app.post("/api/tasks/{task_id}/start")
 def start_task(task_id: str):
     task = get_task(task_id)
@@ -121,7 +136,7 @@ def stop_task(task_id: str):
 
 @app.post("/api/tasks/{task_id}/retry")
 def retry_task(task_id: str):
-    """重试卡死的任务，最多3次，超过则失败"""
+    """手动重试：不受次数限制，重置 retry_count=0，并给出上次失败原因"""
     from queue_manager import is_downloading as qm_is_running, unregister_download
     task = get_task(task_id)
     if not task:
@@ -133,14 +148,16 @@ def retry_task(task_id: str):
         running_procs.pop(task_id, None)
     if qm_is_running(task_id):
         unregister_download(task_id)
-    # 重置并增加重试计数（设为 waiting，加入队列）
-    ok = reset_task_for_retry(task_id)
-    if not ok:
-        return {"message": "重试次数已达上限（3次），请删除任务或手动重置", "max_reached": True}
+    # 手动重试：重置计数为 0，返回错误原因供用户参考
+    last_error = reset_task_for_manual_retry(task_id)
     # 加入队列，等待空闲时启动
     from queue_manager import try_start_next
     try_start_next()
-    return {"message": "任务已加入队列", "retry_count": task.get("retry_count", 0) + 1}
+    return {
+        "message": "任务已加入队列（手动重试，不限次数）",
+        "last_error": last_error,
+        "retry_count": 0
+    }
 
 
 @app.delete("/api/tasks/{task_id}")
