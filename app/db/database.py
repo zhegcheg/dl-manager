@@ -2,6 +2,7 @@
 SQLite 任务状态管理
 """
 import sqlite3
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -167,17 +168,50 @@ def get_task(task_id: str) -> Optional[dict]:
     conn.close()
     return dict(row) if row else None
 
+# 允许的排序列白名单
+_ORDER_BY_WHITELIST = {
+    "id", "name", "m3u8_url", "headers", "key", "iv",
+    "status", "stage", "progress", "speed", "segments",
+    "chunks", "move_speed", "move_elapsed", "error",
+    "retry_count", "created_at", "updated_at", "completed_at",
+    "file", "final_path", "priority", "retry_after", "download_dir",
+}
+
+
+def _validate_order_by(order_by: str) -> str:
+    """校验 order_by 参数，防止 SQL 注入"""
+    if not order_by:
+        return "created_at DESC"
+    parts = order_by.split(",")
+    validated = []
+    for part in parts:
+        part = part.strip()
+        # 格式: column DESC 或 column ASC
+        tokens = part.split()
+        if len(tokens) not in (1, 2):
+            continue
+        col = tokens[0]
+        direction = tokens[1].upper() if len(tokens) == 2 else ""
+        if col not in _ORDER_BY_WHITELIST:
+            continue
+        if direction and direction not in ("ASC", "DESC"):
+            continue
+        validated.append(part if direction else col)
+    if not validated:
+        return "created_at DESC"
+    return ", ".join(validated)
+
+
 def list_tasks(status: str = None, limit: int = 500, order_by: str = None) -> list:
     """
     列出任务，支持自定义排序。
-    
+
     order_by: 排序字段，默认为 'created_at DESC'
               队列调度时使用 'priority DESC, created_at ASC'（高优先级优先，同优先级按创建时间）
     """
+    order_by = _validate_order_by(order_by)
     conn = get_db()
-    if order_by is None:
-        order_by = "created_at DESC"
-    
+
     if status:
         rows = conn.execute(f"SELECT * FROM tasks WHERE status = ? ORDER BY {order_by} LIMIT ?",
                           (status, limit)).fetchall()
@@ -205,7 +239,7 @@ def update_task(task_id: str, reset_retry: bool = False, **fields):
         except sqlite3.OperationalError as e:
             conn.close()
             if attempt < 2 and "locked" in str(e):
-                import time; time.sleep(0.5 * (attempt + 1))
+                time.sleep(0.5 * (attempt + 1))
                 continue
             raise
 
@@ -385,5 +419,3 @@ def set_proxy_config(key: str, value: str):
     )
     conn.commit()
     conn.close()
-
-init()

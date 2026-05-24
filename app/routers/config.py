@@ -1,6 +1,7 @@
 """
 配置 / 代理 / 队列状态 / 媒体 相关 API 路由
 """
+import os
 import os as _os
 from pathlib import Path
 
@@ -171,7 +172,7 @@ def queue_status():
 
 
 # ── 媒体文件 ──
-MEDIA_DIR = Path("/mnt/fn-nas-imovie")
+MEDIA_DIR = Path(os.getenv("NAS_MEDIA_DIR", "/mnt/fn-nas-imovie"))
 
 
 @router.get("/api/media/by-id/{task_id}")

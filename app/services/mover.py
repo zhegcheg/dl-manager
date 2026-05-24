@@ -10,7 +10,7 @@ from pathlib import Path
 from app.db.database import update_task
 from app.db.database import get_download_config
 
-MEDIA_DIR = Path("/mnt/fn-nas-imovie")
+MEDIA_DIR = Path(os.getenv("NAS_MEDIA_DIR", "/mnt/fn-nas-imovie"))
 
 def _do_copy(task_id: str, src: Path, dest: Path):
     """后台复制线程 - 跨平台方案"""
@@ -90,12 +90,8 @@ def _copy_with_dd(task_id: str, src: Path, dest: Path, total_size: int, start: f
             continue
         copied_bytes = 0
         m = re.search(r'([\d.]+)\s*字节', line)
-        if m:
-            copied_bytes = float(m.group(1))
-        else:
+        if not m:
             m = re.search(r'([\d.]+)\s*bytes', line, re.IGNORECASE)
-            if m:
-                copied_bytes = float(m.group(1))
         if m:
             copied_bytes = float(m.group(1))
             elapsed = time.time() - start

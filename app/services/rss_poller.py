@@ -19,6 +19,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 from datetime import datetime
+
 from app.db.database import get_db, get_task, create_task, update_task, get_proxy_config
 
 # Jable 页面解析
@@ -138,6 +139,7 @@ def extract_jable_info(video_url: str) -> dict:
 
 def fetch_jable_m3u8_key(m3u8_url: str) -> tuple[str, str]:
     """从 m3u8 manifest 提取 AES-128 key URI 和 IV"""
+    opener = None
     try:
         req = urllib.request.Request(m3u8_url, headers={
             "User-Agent": "Mozilla/5.0",
@@ -272,5 +274,3 @@ def fetch_all_video_details(video_urls: list) -> list[dict]:
             if r:
                 results.append(r)
     return results
-
-from concurrent.futures import ThreadPoolExecutor

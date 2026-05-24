@@ -52,7 +52,7 @@ def create_app() -> FastAPI:
     # 静态文件
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     web_dir = os.path.join(base_dir, "web")
-    nas_dir = "/mnt/fn-nas-imovie"
+    nas_dir = os.getenv("NAS_MEDIA_DIR", "/mnt/fn-nas-imovie")
 
     if os.path.exists(nas_dir):
         app.mount("/nas", StaticFiles(directory=nas_dir, html=False), name="nas")

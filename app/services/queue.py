@@ -55,10 +55,11 @@ def try_start_next() -> int:
     # 先清理已完成的线程 + 检测卡死任务
     with _lock:
         dead = [tid for tid, proc in _running.items() if proc.poll() is not None]
+        for tid in dead:
+            _running.pop(tid, None)
+            if tid in _order:
+                _order.remove(tid)
     for tid in dead:
-        _running.pop(tid, None)
-        if tid in _order:
-            _order.remove(tid)
         # 检测：线程死了但DB里还是 downloading → 卡死
         t = get_task(tid)
         if t and t["status"] == "downloading":
@@ -73,7 +74,7 @@ def try_start_next() -> int:
                 started += 1
             else:
                 # 超过重试次数，标记失败
-                update_task(tid, status="failed", stage="failed", 
+                update_task(tid, status="failed", stage="failed",
                           error="下载进程异常退出，自动重试3次后放弃")
 
     with _lock:

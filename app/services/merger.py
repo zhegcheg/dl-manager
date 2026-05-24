@@ -88,18 +88,6 @@ def _do_concat_copy(seg_dir: Path, ts_files: list, task_id: str, output_path: Pa
         for ts in ts_files:
             f.write(f"file '{ts.resolve()}'\n")
 
-    def parse_progress(proc):
-        while proc.poll() is None:
-            line = proc.stderr.readline().decode('utf-8', errors='ignore')
-            if not line:
-                continue
-            if "frame=" in line:
-                m = re.search(r'size=\s*(\d+)kB', line)
-                if m:
-                    size_mb = int(m.group(1)) / 1024
-                    progress = min(int(size_mb * 100 / EST_MP4_SIZE_MB), 99)
-                    update_task(task_id, progress=progress, stage="merging")
-
     update_task(task_id, progress=0, stage="merging")
 
     cmd_copy = [
@@ -111,13 +99,21 @@ def _do_concat_copy(seg_dir: Path, ts_files: list, task_id: str, output_path: Pa
     ]
 
     print(f"[merger] {task_id}: 执行 concat copy (with aac_adtstoasc)...")
-    proc = subprocess.Popen(cmd_copy, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+    proc = subprocess.Popen(cmd_copy, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
 
-    t = threading.Thread(target=parse_progress, args=(proc,), daemon=True)
-    t.start()
+    stderr_lines = []
+    for line in iter(proc.stderr.readline, b''):
+        stderr_lines.append(line)
+        line_text = line.decode('utf-8', errors='ignore')
+        if "frame=" in line_text:
+            m = re.search(r'size=\s*(\d+)kB', line_text)
+            if m:
+                size_mb = int(m.group(1)) / 1024
+                progress = min(int(size_mb * 100 / EST_MP4_SIZE_MB), 99)
+                update_task(task_id, progress=progress, stage="merging")
 
-    stdout, stderr = proc.communicate()
-    stderr_text = stderr.decode('utf-8', errors='ignore')
+    proc.wait()
+    stderr_text = b''.join(stderr_lines).decode('utf-8', errors='ignore')
 
     try:
         concat_list.unlink()
@@ -139,20 +135,6 @@ def _do_reencode(seg_dir: Path, ts_files: list, task_id: str, output_path: Path)
         for ts in ts_files:
             f.write(f"file '{ts.resolve()}'\n")
 
-    def parse_reencode_progress(proc):
-        while proc.poll() is None:
-            line = proc.stderr.readline().decode('utf-8', errors='ignore')
-            if not line:
-                continue
-            if "frame=" in line:
-                tm = re.search(r'time=(\d+):(\d+):(\d+)\.\d+', line)
-                if tm:
-                    h, m, s = int(tm.group(1)), int(tm.group(2)), int(tm.group(3))
-                    total_sec = h * 3600 + m * 60 + s
-                    est_total = EST_MP4_SIZE_MB * 1024 / 1.6
-                    progress = min(int(total_sec * 100 / est_total), 99)
-                    update_task(task_id, progress=progress, stage="merging_reencode")
-
     update_task(task_id, progress=0, stage="merging_reencode")
 
     cmd_reencode = [
@@ -165,13 +147,23 @@ def _do_reencode(seg_dir: Path, ts_files: list, task_id: str, output_path: Path)
     ]
 
     print(f"[merger] {task_id}: 执行 re-encode (libx264+aac)...")
-    proc2 = subprocess.Popen(cmd_reencode, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+    proc2 = subprocess.Popen(cmd_reencode, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
 
-    t2 = threading.Thread(target=parse_reencode_progress, args=(proc2,), daemon=True)
-    t2.start()
+    stderr2_lines = []
+    for line in iter(proc2.stderr.readline, b''):
+        stderr2_lines.append(line)
+        line_text = line.decode('utf-8', errors='ignore')
+        if "frame=" in line_text:
+            tm = re.search(r'time=(\d+):(\d+):(\d+)\.\d+', line_text)
+            if tm:
+                h, m, s = int(tm.group(1)), int(tm.group(2)), int(tm.group(3))
+                total_sec = h * 3600 + m * 60 + s
+                est_total = EST_MP4_SIZE_MB * 1024 / 1.6
+                progress = min(int(total_sec * 100 / est_total), 99)
+                update_task(task_id, progress=progress, stage="merging_reencode")
 
-    stdout2, stderr2 = proc2.communicate()
-    stderr2_text = stderr2.decode('utf-8', errors='ignore')
+    proc2.wait()
+    stderr2_text = b''.join(stderr2_lines).decode('utf-8', errors='ignore')
 
     try:
         concat_list.unlink()

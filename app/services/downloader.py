@@ -17,16 +17,16 @@ POLL_INTERVAL = 1  # DB 更新频率（秒），避免写入太频繁
 
 class DownloadThread:
     """下载线程包装，提供类似 subprocess.Popen 的接口"""
-    
-    def __init__(self, thread: threading.Thread, task_id: str):
+
+    def __init__(self, task_id: str, thread: Optional[threading.Thread] = None):
         self._thread = thread
         self._task_id = task_id
         self._stop_flag = threading.Event()
         self._exit_code: Optional[int] = None
-    
+
     def poll(self) -> Optional[int]:
         """返回退出码，None 表示仍在运行"""
-        if not self._thread.is_alive():
+        if self._thread is None or not self._thread.is_alive():
             return self._exit_code if self._exit_code is not None else 0
         return None
     
@@ -129,7 +129,7 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
     Path(temp_dir).mkdir(parents=True, exist_ok=True)
     
     # 创建下载线程对象
-    download_thread = DownloadThread(threading.Thread(target=_dummy), task_id)
+    download_thread = DownloadThread(task_id)
     
     # 构建 yt-dlp 选项 — 分片下载到 temp_dir
     ydl_opts = {
@@ -169,12 +169,6 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
             http_headers[k.strip()] = v.strip()
         if http_headers:
             ydl_opts['http_headers'] = http_headers
-    
-    # 添加 HLS 解密支持
-    # yt-dlp 自动处理 AES-128 加密，如果有自定义 key 则通过 extractor_args 传递
-    if key:
-        # 移除 allow_unplayable_formats，避免警告
-        pass
     
     # 更新任务状态
     update_task(task_id, status="downloading", stage="downloading", progress=0, error="")
@@ -277,6 +271,4 @@ def _cleanup_temp(temp_dir: str, task_id: str):
             pass
 
 
-def _dummy():
-    """占位函数，实际工作线程在 start_download 中创建"""
-    pass
+

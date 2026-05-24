@@ -15,3 +15,5 @@ services:
       - /mnt/fn-nas-imovie:/mnt/fn-nas-imovie
     environment:
       - TZ=Asia/Shanghai
+      # NAS 媒体目录路径（容器内路径，需与 volumes 挂载对应）
+      - NAS_MEDIA_DIR=/mnt/fn-nas-imovie
