@@ -420,7 +420,29 @@ createApp({
         es.onmessage = (e) => {
           try {
             const data = JSON.parse(e.data)
-            tasks.value = data.list || []
+            const newList = data.list || []
+            // 按 id 合并更新，避免全量替换导致进度条闪烁
+            const map = new Map(newList.map(t => [t.id, t]))
+            const oldIds = new Set(tasks.value.map(t => t.id))
+            const newIds = new Set(map.keys())
+            // 有增删时直接替换，只有纯更新时合并
+            const hasAddRemove = oldIds.size !== newIds.size || [...oldIds].some(id => !newIds.has(id))
+            if (hasAddRemove) {
+              tasks.value = newList
+            } else {
+              tasks.value = tasks.value.map(old => {
+                const updated = map.get(old.id)
+                if (!updated) return old
+                // 只在关键字段变化时替换对象引用，否则复用旧对象避免无意义重渲染
+                if (old.status !== updated.status || old.stage !== updated.stage ||
+                    old.progress !== updated.progress || old.speed !== updated.speed ||
+                    old.segments !== updated.segments || old.error !== updated.error ||
+                    old.move_speed !== updated.move_speed || old.priority !== updated.priority) {
+                  return updated
+                }
+                return old
+              })
+            }
           } catch(err) {}
         }
         es.onerror = () => {

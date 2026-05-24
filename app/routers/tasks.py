@@ -49,10 +49,10 @@ async def task_events():
 
             while True:
                 try:
-                    payload = await asyncio.wait_for(q.get(), timeout=30)
+                    payload = await asyncio.wait_for(q.get(), timeout=15)
                     yield f"data: {json.dumps(payload)}\n\n"
                 except asyncio.TimeoutError:
-                    # 每 30 秒发送心跳保持连接
+                    # 每 15 秒发送心跳保持连接
                     yield ": heartbeat\n\n"
         finally:
             await unsubscribe(q)
