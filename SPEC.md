@@ -1,138 +1,379 @@
-# Jable Download Manager - 技术规格
+# DL Manager - 技术规格
 
 ## 架构
 
 ```
-┌─────────────────────────────┐
-│  小智 (OpenClaw Agent)      │
-│  - RSS 抓取                 │
-│  - 任务推送 (本地 HTTP)      │
-│  - 监听 SSE 完成事件         │
-└──────────┬──────────────────┘
-           │ HTTP POST / SSE
-           ▼
-┌─────────────────────────────┐
-│  JableDL Server (本机:8899) │
-│  - FastAPI                  │
-│  - N_m3u8DL-RE 下载器       │
-│  - ffmpeg 合并器            │
-│  - SQLite 状态库            │
-│  - Web UI (Vue)             │
-└─────────────────────────────┘
-           │
-           ▼
-┌─────────────────────────────┐
-│  /mnt/fn-nas-imovie/        │
-│  (媒体库目录)                │
-└─────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  Vue 3 前端 (web/)                                    │
+│  index.html (任务/订阅/设置) · player.html (播放)     │
+└───────────────────────┬──────────────────────────────┘
+                        │ HTTP REST + SSE
+┌───────────────────────┴──────────────────────────────┐
+│  FastAPI 后端 (server.py → app/main.py)               │
+│                                                       │
+│  Routers: tasks · sources · config                    │
+│  Services: downloader · merger · mover · queue        │
+│            rss_poller · scheduler                     │
+│  Events: SSE 广播 (events.py)                         │
+│  Storage: SQLite (database.py, WAL mode)              │
+└──────────────────────────────────────────────────────┘
+          │                    │
+    yt-dlp + ffmpeg      NAS (/mnt/fn-nas-imovie/)
 ```
 
 ## 任务状态机
 
 ```
-waiting → downloading → merging → moving → completed
-                              ↘ failed
+                    ┌──────────┐
+                    │ waiting  │ ← 创建 / 自动重试(退避) / 手动重试
+                    └────┬─────┘
+                         │ try_start_next() (优先级排序)
+                         ▼
+                   ┌─────────────┐
+                   │ downloading │ ← yt-dlp 多线程分片下载
+                   └──────┬──────┘
+                          │ 下载完成
+                          ▼
+                    ┌──────────┐
+                    │ merging  │ ← ffmpeg concat copy / re-encode
+                    └────┬─────┘
+                         │ 合并完成
+                         ▼
+                    ┌──────────┐
+                    │ moving   │ ← 异步复制到 NAS (dd/Python)
+                    └────┬─────┘
+                         │ 转移完成
+                         ▼
+                    ┌───────────┐
+                    │ completed │
+                    └───────────┘
+
+  任何阶段 ──→ failed (错误)
+  任何运行阶段 ──→ stopped (用户暂停/停止)
+
+  重启恢复:
+    downloading → waiting (断点续传)
+    merging → 后台恢复合并
+    moving → 后台恢复转移
 ```
-
-## API 端点
-
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `POST /api/tasks` | 创建任务 | m3u8_url, name, headers, key |
-| `GET /api/tasks` | 任务列表 | filter=status |
-| `GET /api/tasks/{id}` | 任务详情 | 含 progress, speed, stage |
-| `DELETE /api/tasks/{id}` | 删除任务 | kill 进程 + 清理 |
-| `GET /api/tasks/{id}/logs` | 实时日志 | SSE 流 |
-| `GET /api/events` | 全局事件 | download-success/failed/stopped |
 
 ## 任务字段
 
 ```json
 {
-  "id": "ntrh-021",
-  "name": "NTRH-021 被睡走就睡回來 被睡走的妻子...",
-  "m3u8_url": "https://xxx.m3u8",
-  "headers": "Referer: https://jable.tv/...",
+  "id": "julia-021",
+  "name": "视频标题",
+  "m3u8_url": "https://cdn.example.com/video/index.m3u8",
+  "headers": "Referer: https://jable.tv/\r\nUser-Agent: ...",
   "key": "0a42765b28a3b247a0424317b8bdc657",
   "iv": "0xc5537ce953bc7bd79d357c4be6536634",
   "status": "downloading",
   "stage": "downloading",
-  "progress": 75,
-  "speed": "2.5MB/s",
+  "progress": 75.5,
+  "speed": "2.50MB/s",
   "segments": "1918/2558",
-  "chunks": null,
-  "move_speed": null,
-  "move_elapsed": null,
-  "error": null,
+  "chunks": "",
+  "move_speed": "",
+  "move_elapsed": "",
+  "error": "",
+  "retry_count": 0,
+  "retry_after": "",
+  "priority": 0,
+  "download_dir": "",
   "created_at": "2026-05-23T06:50:00Z",
   "updated_at": "2026-05-23T06:51:00Z",
   "completed_at": null,
-  "file": "/home/zhegcheg/.openclaw/workspace/jable-dl-server/tasks/ntrh-021/ntrh-021.mp4",
-  "final_path": null
+  "file": "/root/.jable-dl-server/tasks/julia-021.mp4",
+  "final_path": "/mnt/fn-nas-imovie/视频标题.mp4"
 }
 ```
 
 ## Stage 详情
 
-| stage | 关键字段 |
-|-------|---------|
-| waiting | - |
-| downloading | progress, speed, segments |
-| merging | progress, chunks (done/total) |
-| moving | move_speed, move_elapsed |
-| completed | file, final_path, total_time |
-| failed | error |
+| stage | 关键字段 | 说明 |
+|-------|---------|------|
+| `waiting` | priority, retry_after | 等待调度，支持优先级和退避时间 |
+| `downloading` | progress, speed, segments | yt-dlp 下载中，实时进度 |
+| `merging` | progress | ffmpeg concat copy 合并中 |
+| `merging_reencode` | progress | ffmpeg re-encode 合并中（编码跳变时） |
+| `moving` | progress, move_speed, move_elapsed | 异步转移到 NAS |
+| `completed` | file, final_path, move_speed="done" | 全部完成 |
+| `failed` | error | 失败（含错误信息） |
+| `stopped` | error | 用户暂停/停止 |
 
-## N_m3u8DL-RE 调用方式
+## 下载流程 (yt-dlp)
 
-```bash
-./N_m3u8DL-RE "<m3u8_url>" \
-  --save-dir "<task_dir>" \
-  --save-name "<id>" \
-  --custom-hls-key "<key>" \
-  --custom-hls-iv "<iv>" \
-  -H "Referer: https://jable.tv/" \
-  -H "User-Agent: Mozilla/5.0..." \
-  --log-level DEBUG \
-  --log-file-path "<log_file>" \
-  --thread-count 8
+```python
+# downloader.py - start_download()
+ydl_opts = {
+    'outtmpl': '{temp_dir}/{task_id}.%(ext)s',
+    'concurrent_fragment_downloads': thread_count,  # 多线程分片
+    'continuedl': True,          # 断点续传
+    'merge_output_format': 'mp4', # 自动合并
+    'retries': 10,               # 自动重试
+    'fragment_retries': 10,      # 分片重试
+    'http_chunk_size': 10485760, # 10MB 分块
+    'progress_hooks': [hook],    # 进度回调
+}
 ```
 
-进度解析：解析日志中的 `Vid Kbps: XX%` 行。
+**流程**: temp_dir 分片下载 → yt-dlp 自动合并 MP4 → move 到 download_dir → 异步转移到 NAS
 
-## 合并流程
+**进度回调**: `progress_hook` 每 1 秒更新一次 DB（POLL_INTERVAL=1），提取 progress/speed/segments
 
-1. 下载产生 T0000.ts ~ T0025.ts + 临时 .ts.tmp 文件
-2. 清理 .ts.tmp 和 core 文件
-3. ffmpeg concat demuxer 合并为 single.mp4
-4. 重命名为最终名称
-5. 转移到 /mnt/fn-nas-imovie/
-6. 清理 task 目录
+**代理支持**: 根据 proxy_config 自动设置 `ydl_opts['proxy']`（http/socks5）
 
-## Web UI 页面
+## 合并流程 (ffmpeg)
 
-- 任务列表页 (`/`)：卡片展示所有任务
-  - 状态标签（waiting/downloading/merging/moving/completed/failed）
-  - 进度条（下载/合并/转移）
-  - 速度显示
-  - 创建时间
-- 任务详情页 (`/task/{id}`)：实时日志滚动
-- 自动刷新：下载中任务每 3 秒轮询
+```
+merger.py - merge_ts_to_mp4()
+
+1. 采样 ffprobe 检测编码跳变（首/中/尾三个 TS）
+2. 若无跳变:
+   → concat copy + aac_adtstoasc（最快，-c:v copy -c:a copy）
+   → 失败则 fallback 到 re-encode
+3. 若有跳变:
+   → 直接 re-encode（libx264 preset=fast crf=23 + aac 128k + faststart）
+```
+
+## 转移流程 (mover.py)
+
+```
+move_to_media_library() → 启动后台线程
+
+Linux:  dd bs=4M status=progress → 解析 stderr 获取进度
+Windows: Python 原生 4MB chunk 复制 → 计算进度
+
+完成后:
+  - 更新 status=completed, final_path=NAS路径
+  - 删除源文件 (unlink)
+  - 清理 download_dir/{task_id}/ 目录
+```
+
+**文件名处理**: CIFS 文件名上限 255 字符，超过 200 字符自动截断到 120
+
+## 队列管理 (queue.py)
+
+### 优先级调度
+
+```python
+# try_start_next() 排序规则
+order_by = "priority DESC, created_at ASC"
+# 高优先级先下载，同优先级按创建时间
+```
+
+### 并发控制
+
+- `max_concurrent` 可配置 1-10，动态调整
+- `apply_max_concurrent(new_limit)`: 调小时停掉最后启动的多余任务
+- 所有操作（start/retry/batch）均经过队列检查
+
+### 智能重试（指数退避）
+
+```python
+RETRY_BACKOFF = [60, 300, 900]  # 1min, 5min, 15min
+
+# 自动重试: retry_count < 3，每次失败增加退避时间
+# 手动重试: 重置 retry_count=0，不受限制
+```
+
+### 启动恢复 (cleanup_finished)
+
+```
+服务启动时扫描所有任务:
+  downloading → waiting（进程已死，yt-dlp 支持断点续传）
+  moving (未完成) → 后台线程重新转移
+  merging → 后台线程重新合并
+  failed (含"合并"错误) → 后台线程重试合并
+```
+
+## SSE 实时推送 (events.py)
+
+```
+工作线程调用 mark_dirty() → 设置脏标记
+broadcast_worker (asyncio) → 每 500ms 检查脏标记
+  → 有变更: 查询全部任务列表 → 推送给所有 SSE 订阅者
+  → 无变更: 跳过
+SSE 端点: GET /api/tasks/events
+  → 连接时立即推送一次当前列表
+  → 每 15s 发送心跳保持连接
+```
+
+## RSS 轮询 (rss_poller.py)
+
+### Jable 页面抓取
+
+```
+fetch_jable_page(video_url) → HTML
+extract_jable_info(video_url) → {id, name, m3u8_url, key, iv, headers}
+
+提取策略:
+  - title: <title> 标签 → 清理后缀
+  - m3u8: 正则匹配 https?://...m3u8
+  - AES key: 正则匹配 crypto/key/iv 或 mushroomtrack 域名 hex
+  - video_id: 从 URL /videos/{id} 提取
+```
+
+### 代理支持
+
+```python
+_get_proxy_opener() → urllib opener (配置了 ProxyHandler)
+# 用于 RSS 轮询和页面抓取（yt-dlp 有独立的代理配置）
+```
+
+### 去重
+
+```python
+# 检查 video_id 是否已存在
+existing = get_task(vid)
+if existing and existing["status"] not in ("failed", "stopped"):
+    continue  # 跳过已存在的非失败任务
+```
+
+## 数据库设计 (SQLite)
+
+### 表结构
+
+```sql
+-- 任务表
+tasks (
+    id TEXT PRIMARY KEY,          -- 视频 ID
+    name TEXT NOT NULL,           -- 标题
+    m3u8_url TEXT NOT NULL,       -- m3u8 播放列表 URL
+    headers TEXT DEFAULT '',      -- 自定义 HTTP 头
+    key TEXT DEFAULT '',          -- HLS AES 密钥 (hex)
+    iv TEXT DEFAULT '',           -- HLS AES IV (hex)
+    status TEXT DEFAULT 'waiting',-- 状态
+    stage TEXT DEFAULT 'waiting', -- 阶段
+    progress REAL DEFAULT 0,      -- 进度 0-100
+    speed TEXT DEFAULT '',        -- 下载速度
+    segments TEXT DEFAULT '',     -- 分片进度 "1918/2558"
+    move_speed TEXT DEFAULT '',   -- 转移速度
+    move_elapsed TEXT DEFAULT '', -- 转移耗时
+    error TEXT DEFAULT '',        -- 错误信息
+    retry_count INTEGER DEFAULT 0,-- 重试次数
+    retry_after TEXT DEFAULT '',  -- 退避截止时间
+    priority INTEGER DEFAULT 0,   -- 优先级 -100~100
+    download_dir TEXT DEFAULT '', -- 自定义下载目录
+    file TEXT DEFAULT '',         -- 本地文件路径
+    final_path TEXT DEFAULT '',   -- NAS 最终路径
+    created_at TEXT, updated_at TEXT, completed_at TEXT
+)
+
+-- 订阅源表
+subscription_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT, url TEXT,
+    feed_type TEXT DEFAULT 'jable',
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT, updated_at TEXT
+)
+
+-- 调度配置 (key-value)
+scheduler_config (key TEXT PRIMARY KEY, value TEXT)
+  -- rss_cron: "0 4 * * *"
+  -- rss_enabled: "true"
+
+-- 下载配置 (key-value)
+download_config (key TEXT PRIMARY KEY, value TEXT)
+  -- download_dir, temp_dir, max_concurrent, thread_count, move_to_nas
+
+-- 代理配置 (key-value)
+proxy_config (key TEXT PRIMARY KEY, value TEXT)
+  -- enabled, type, host, port
+```
+
+### SQLite 配置
+
+```python
+PRAGMA journal_mode=WAL        # 写前日志，支持并发读写
+PRAGMA busy_timeout=30000      # 锁等待 30 秒
+```
+
+## 媒体流 (config.py)
+
+```
+GET /api/media/by-id/{task_id}
+  → 从 task 的 file/final_path 获取文件路径
+  → 支持 Range 请求 (HTTP 206 Partial Content)
+  → 64KB chunk 流式传输
+  → Content-Type: video/mp4
+
+GET /api/media/{filename}
+  → 从 NAS MEDIA_DIR 提供文件
+  → FileResponse
+```
+
+## 前端架构
+
+```
+Vue 3 (CDN, 无构建) → 单页应用
+
+三个标签页:
+  1. 任务列表 (tasks) - 统计栏 + 筛选栏 + 卡片/列表视图 + 分页
+  2. 订阅源 (sources) - 添加/编辑/删除/启停
+  3. 设置 (settings) - 下载/调度/代理配置
+
+实时通信:
+  SSE (/api/tasks/events) → 任务变更自动刷新
+  连接断开自动重连 (5s)
+
+添加视频弹窗:
+  - Jable 模式: 输入视频页 URL → POST /api/tasks/from-url
+  - m3u8 模式: 输入 m3u8 URL + 名称 + headers → POST /api/tasks/from-m3u8
+```
+
+## Docker 部署
+
+```dockerfile
+# Dockerfile
+FROM python:3.10-slim
+RUN apt-get install -y curl ffmpeg   # ffmpeg 用于合并
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+EXPOSE 8899
+CMD ["python3", "server.py"]
+```
+
+```yaml
+# docker-compose.yml
+network_mode: "host"
+volumes:
+  - tasks:/app/tasks
+  - data:/root/.jable-dl-server
+  - nas:/mnt/fn-nas-imovie
+environment:
+  TZ: Asia/Shanghai
+```
 
 ## 文件结构
 
 ```
-jable-dl-server/
-├── server.py           # FastAPI 主入口
-├── task_db.py          # SQLite 操作
-├── ntrh_downloader.py  # N_m3u8DL-RE 包装器
-├── merger.py           # ffmpeg 合并
-├── mover.py            # 文件转移
-├── api.py              # HTTP API 路由
+dl-manager/
+├── server.py                       # uvicorn 入口
+├── app/
+│   ├── main.py                     # FastAPI 工厂 + lifespan
+│   ├── events.py                   # SSE 事件总线
+│   ├── db/
+│   │   └── database.py             # SQLite CRUD
+│   ├── routers/
+│   │   ├── tasks.py                # /api/tasks/*
+│   │   ├── sources.py              # /api/sources/* + /api/rss/*
+│   │   └── config.py               # /api/config/* + /api/proxy/* + /api/media/*
+│   └── services/
+│       ├── downloader.py           # yt-dlp 下载
+│       ├── merger.py               # ffmpeg 合并
+│       ├── mover.py                # 文件转移
+│       ├── queue.py                # 队列调度
+│       ├── rss_poller.py           # RSS/Jable 轮询
+│       └── scheduler.py            # APScheduler
 ├── web/
-│   ├── index.html      # 单页应用
-│   ├── style.css
-│   └── app.js          # Vue 组件
-├── run.sh              # 启动脚本
+│   ├── index.html                  # 主页面
+│   ├── app.js                      # 前端逻辑
+│   ├── style.css                   # 样式
+│   └── player.html                 # 播放器
+├── Dockerfile
+├── docker-compose.yml
 └── requirements.txt
 ```
