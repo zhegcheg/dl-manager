@@ -2,15 +2,10 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# 安装系统依赖
+# 安装系统依赖 + ffmpeg (yt-dlp 合并需要)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
+    curl ffmpeg \
     && rm -rf /var/lib/apt/lists/*
-
-# 下载 N_m3u8DL-RE
-RUN curl -sL "https://github.com/nilaoda/N_m3u8DL-RE/releases/latest/download/N_m3u8DL-RE_Linux_x64.tar.gz" \
-    | tar -xz -C /usr/local/bin/ N_m3u8DL-RE && \
-    chmod +x /usr/local/bin/N_m3u8DL-RE
 
 # 安装 Python 依赖
 COPY requirements.txt .

@@ -15,6 +15,7 @@ createApp({
     const starting = ref(false)
     const schedulerConfig = ref({rss_cron: '0 4 * * *', rss_enabled: 'true'})
     const downloadConfig = ref({download_dir: '', max_concurrent: '2', thread_count: '8'})
+    const proxyConfig = ref({enabled: 'false', type: 'http', host: '', port: '7890'})
     const newSource = ref({name:'', url:'', feed_type: 'jable'})
     const deleteTarget = ref(null)
     const editingSource = ref(null)
@@ -22,6 +23,10 @@ createApp({
     const addUrl = ref('')
     const adding = ref(false)
     const addMsg = ref('')
+    const configSaved = ref('')
+    const configSaving = ref(false)
+    const proxySaved = ref('')
+    const proxySaving = ref(false)
     let pollTimer = null
     let logSource = null
 
@@ -51,9 +56,10 @@ createApp({
       for (const t of tasks.value) {
         if (t.stage === 'downloading' && t.speed) {
           const s = t.speed.trim()
-          if (s.endsWith('MBps')) total += parseFloat(s) || 0
-          else if (s.endsWith('KBps')) total += (parseFloat(s) || 0) / 1024
-          else if (s.endsWith('GBps')) total += (parseFloat(s) || 0) * 1024
+          // 支持 MB/s, KB/s, GB/s, B/s (yt-dlp 格式) 和 MBps, KBps (旧格式)
+          if (s.endsWith('MB/s') || s.endsWith('MBps')) total += parseFloat(s) || 0
+          else if (s.endsWith('KB/s') || s.endsWith('KBps')) total += (parseFloat(s) || 0) / 1024
+          else if (s.endsWith('GB/s') || s.endsWith('GBps')) total += (parseFloat(s) || 0) * 1024
         }
       }
       return total
@@ -168,7 +174,27 @@ createApp({
         const data = d.data || {}
         schedulerConfig.value = {rss_cron: data.rss_cron || '0 4 * * *', rss_enabled: data.rss_enabled || 'true'}
         downloadConfig.value = {download_dir: data.download_dir || '', max_concurrent: data.max_concurrent || '2', thread_count: data.thread_count || '8'}
+        proxyConfig.value = {enabled: data.enabled || 'false', type: data.type || 'http', host: data.host || '', port: data.port || '7890'}
       } catch(e) {}
+    }
+
+    async function saveProxyConfig() {
+      proxySaving.value = true
+      proxySaved.value = ''
+      try {
+        const r = await fetch('/api/proxy', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(proxyConfig.value)
+        })
+        const d = await r.json()
+        proxySaved.value = d.message || '已保存'
+        setTimeout(() => proxySaved.value = '', 3000)
+      } catch(e) {
+        alert('保存代理设置失败: ' + (e.message || e))
+        console.error(e)
+      }
+      proxySaving.value = false
     }
 
     async function startAll() {
@@ -179,9 +205,6 @@ createApp({
       } catch(e) {}
       starting.value = false
     }
-
-    const configSaved = ref('')
-    const configSaving = ref(false)
 
     async function saveDownloadConfig() {
       const mc = Math.max(1, Math.min(10, parseInt(downloadConfig.value.max_concurrent) || 2))
@@ -373,6 +396,7 @@ createApp({
              configSaved, configSaving, saveDownloadConfig, saveSchedulerConfig, retryTask, startTask, stopTask,
              selected, selectedCount, allSelected, canBatchStart, canBatchStop, canBatchRetry, viewMode, page, pageSize, totalPages, showPagination, goPage, setPageSize,
              toggleSelect, toggleSelectAll, batchStart, batchStop, batchRetry, batchDelete, toggleViewMode,
-             showAddModal, addUrl, adding, addMsg, doAddVideo }
+             showAddModal, addUrl, adding, addMsg, doAddVideo,
+             proxyConfig, proxySaved, proxySaving, saveProxyConfig }
   }
 }).mount('#app')

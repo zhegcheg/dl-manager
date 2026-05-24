@@ -13,7 +13,7 @@ import re
 import threading
 import os
 from pathlib import Path
-from task_db import update_task
+from app.db.database import update_task
 
 # 估算文件大小（MB），用于进度计算
 EST_MP4_SIZE_MB = 2048

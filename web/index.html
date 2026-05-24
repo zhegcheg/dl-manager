@@ -13,10 +13,10 @@
   <div class="header">
     <h1>🎬 DL Manager</h1>
     <div class="actions">
+      <button class="btn" @click="showAddModal=true" style="border-color:#ff6b9d;color:#ff6b9d;">➕ 添加视频</button>
       <button class="btn" @click="tab='tasks'">📋 任务</button>
       <button class="btn" @click="tab='sources'">📡 订阅源</button>
       <button class="btn" @click="tab='settings'">⚙ 设置</button>
-      <button class="btn" @click="showAddModal=true" style="border-color:#ff6b9d;color:#ff6b9d;">➕ 添加视频</button>
     </div>
   </div>
   <div class="msg" v-if="pollMsg">[[ pollMsg ]]</div>
@@ -226,6 +226,34 @@
       </div>
       <div class="item" style="margin-top:8px;">
         <button class="btn" @click="saveSchedulerConfig">💾 保存调度</button>
+      </div>
+    </div>
+
+    <!-- 代理设置 -->
+    <div class="scheduler-config">
+      <h3 style="font-size:14px;color:#ff6b9d;margin-bottom:12px;">🌐 代理设置</h3>
+      <div class="item">
+        <label>启用代理</label>
+        <button class="toggle" :class="{on: proxyConfig.enabled==='true'}" @click="proxyConfig.enabled = proxyConfig.enabled==='true' ? 'false' : 'true'"></button>
+      </div>
+      <div class="item">
+        <label>代理类型</label>
+        <select v-model="proxyConfig.type" style="background:#0f0f0f;border:1px solid #333;border-radius:8px;padding:8px 12px;color:#fff;font-size:13px;width:120px;">
+          <option value="http">HTTP</option>
+          <option value="socks5">SOCKS5</option>
+        </select>
+      </div>
+      <div class="item">
+        <label>主机地址</label>
+        <input v-model="proxyConfig.host" placeholder="127.0.0.1" style="width:160px;">
+      </div>
+      <div class="item">
+        <label>端口号</label>
+        <input v-model="proxyConfig.port" placeholder="7890" type="number" min="1" max="65535" style="width:100px;">
+      </div>
+      <div class="item" style="margin-top:8px;">
+        <button class="btn" @click="saveProxyConfig" :disabled="proxySaving">💾 [[ proxySaving ? '保存中...' : '保存代理' ]]</button>
+        <span style="color:#4ade80;font-size:13px;margin-left:12px;font-weight:500;" v-if="proxySaved">✅ [[ proxySaved ]]</span>
       </div>
     </div>
   </div>

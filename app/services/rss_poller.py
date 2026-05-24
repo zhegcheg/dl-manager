@@ -15,9 +15,11 @@ import time
 import sqlite3
 import subprocess
 import threading
+import urllib.request
+import urllib.error
 from pathlib import Path
 from datetime import datetime
-from task_db import get_db, get_task, create_task, update_task
+from app.db.database import get_db, get_task, create_task, update_task, get_proxy_config
 
 # Jable 页面解析
 JABLE_PAGE_HEADERS = {
@@ -27,18 +29,44 @@ JABLE_PAGE_HEADERS = {
 
 REFERER = "Referer: https://jable.tv/\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36\r\n"
 
-def fetch_jable_page(video_url: str, timeout: int = 15) -> str:
-    """抓取 Jable 视频页面 HTML"""
+def _get_proxy_opener():
+    """根据 proxy_config 返回配置了代理的 urllib opener，或 None"""
     try:
-        proc = subprocess.run(
-            ["curl", "-s", "-L", "--max-time", str(timeout),
-             "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-             "-H", "Accept: text/html,application/xhtml+xml",
-             video_url],
-            capture_output=True, text=True, timeout=timeout + 5
-        )
-        return proc.stdout
-    except Exception:
+        cfg = get_proxy_config()
+        if cfg.get("enabled") != "true":
+            return None
+        proxy_type = cfg.get("type", "http")
+        host = cfg.get("host", "").strip()
+        port = cfg.get("port", "7890").strip()
+        if not host:
+            return None
+        proxy_url = f"{proxy_type}://{host}:{port}"
+        proxy_handler = urllib.request.ProxyHandler({
+            "http": proxy_url,
+            "https": proxy_url,
+        })
+        return urllib.request.build_opener(proxy_handler)
+    except Exception as e:
+        print(f"[_get_proxy_opener] Failed to build proxy opener: {e}")
+        return None
+
+def fetch_jable_page(video_url: str, timeout: int = 15) -> str:
+    """抓取 Jable 视频页面 HTML（使用 urllib 兼容 Windows/Linux）"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+    }
+    try:
+        req = urllib.request.Request(video_url, headers=headers)
+        opener = _get_proxy_opener()
+        if opener:
+            with opener.open(req, timeout=timeout) as resp:
+                return resp.read().decode('utf-8', errors='replace')
+        else:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode('utf-8', errors='replace')
+    except Exception as e:
+        print(f"[fetch_jable_page] Failed to fetch {video_url}: {e}")
         return ""
 
 def extract_jable_info(video_url: str) -> dict:
@@ -66,13 +94,13 @@ def extract_jable_info(video_url: str) -> dict:
     # 提取 m3u8 URL（保留查询参数，某些 CDN token 是必需的）
     m3u8_match = re.search(r'https?://[^"\'<>\s]+\.m3u8[^"\'<>\s]*', html)
     m3u8_url = m3u8_match.group(0) if m3u8_match else ""
-    m3u8_url = m3u8_url.rstrip('",\\')')
+    m3u8_url = m3u8_url.rstrip('",\\')
 
     if not m3u8_url:
         # 尝试从 JSON 转义格式中找
         json_match = re.search(r'https?://[^"\'<>\s]+\\/[^"\'<>\s]*\.m3u8[^"\'<>\s]*', html)
         if json_match:
-            m3u8_url = json_match.group(0).replace('\\/', '/').rstrip('",\\')')
+            m3u8_url = json_match.group(0).replace('\\/', '/').rstrip('",\\')
 
     if not m3u8_url:
         print(f"[extract_jable_info] no m3u8 found in {video_url}, html_len={len(html)}")
@@ -111,14 +139,17 @@ def extract_jable_info(video_url: str) -> dict:
 def fetch_jable_m3u8_key(m3u8_url: str) -> tuple[str, str]:
     """从 m3u8 manifest 提取 AES-128 key URI 和 IV"""
     try:
-        result = subprocess.run(
-            ["curl", "-s", "--max-time", "10",
-             "-H", "User-Agent: Mozilla/5.0",
-             "-H", "Referer: https://jable.tv/",
-             m3u8_url],
-            capture_output=True, text=True, timeout=15
-        )
-        manifest = result.stdout
+        req = urllib.request.Request(m3u8_url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://jable.tv/",
+        })
+        opener = _get_proxy_opener()
+        if opener:
+            with opener.open(req, timeout=15) as resp:
+                manifest = resp.read().decode('utf-8', errors='replace')
+        else:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                manifest = resp.read().decode('utf-8', errors='replace')
     except Exception:
         manifest = ""
 
@@ -129,14 +160,17 @@ def fetch_jable_m3u8_key(m3u8_url: str) -> tuple[str, str]:
         base_url = m3u8_url.rsplit('/', 1)[0]
         key_url = base_url + '/' + key_uri_match.group(1)
         try:
-            key_result = subprocess.run(
-                ["curl", "-s", "--max-time", "10",
-                 "-H", "Referer: https://jable.tv/",
-                 key_url],
-                capture_output=True, timeout=15
-            )
-            key_hex = key_result.stdout.hex()
-            key = key_hex[:32] if len(key_hex) >= 32 else key_hex
+            key_req = urllib.request.Request(key_url, headers={
+                "Referer": "https://jable.tv/",
+            })
+            if opener:
+                with opener.open(key_req, timeout=15) as resp:
+                    key_hex = resp.read().hex()
+                    key = key_hex[:32] if len(key_hex) >= 32 else key_hex
+            else:
+                with urllib.request.urlopen(key_req, timeout=15) as resp:
+                    key_hex = resp.read().hex()
+                    key = key_hex[:32] if len(key_hex) >= 32 else key_hex
         except Exception:
             pass
 
@@ -156,13 +190,16 @@ def poll_jable_source(source: dict) -> list[dict]:
     url = source["url"]
 
     try:
-        result = subprocess.run(
-            ["curl", "-s", "-L", "--max-time", "30",
-             "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-             url],
-            capture_output=True, text=True, timeout=35
-        )
-        content = result.stdout
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        })
+        opener = _get_proxy_opener()
+        if opener:
+            with opener.open(req, timeout=35) as resp:
+                content = resp.read().decode('utf-8', errors='replace')
+        else:
+            with urllib.request.urlopen(req, timeout=35) as resp:
+                content = resp.read().decode('utf-8', errors='replace')
     except Exception:
         return []
 
@@ -199,7 +236,7 @@ def poll_jable_source(source: dict) -> list[dict]:
 
 def poll_all_sources() -> list[dict]:
     """轮询所有启用的订阅源"""
-    from subscriptions import list_sources
+    from app.db.database import list_sources
     sources = list_sources(enabled_only=True)
     all_new = []
     for src in sources:

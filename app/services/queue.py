@@ -1,15 +1,21 @@
 """
-下载队列管理器：控制并发数，自动启动等待中的任务
+下载队列管理器
+- 优先级队列（priority DESC, created_at ASC）
+- 智能重试（指数退避）
+- 并发控制
 """
 import threading
 import time
-from task_db import get_task, list_tasks, update_task, get_download_config
+from datetime import datetime, timedelta
+from app.db.database import get_task, list_tasks, update_task, get_download_config
 
 
-
-_running = {}  # task_id -> proc
+_running = {}  # task_id -> proc/thread
 _order = []    # task_id 启动顺序（用于按序停止）
 _lock = threading.Lock()
+
+# 指数退避重试时间表（秒）
+RETRY_BACKOFF = [60, 300, 900]  # 1min, 5min, 15min
 
 def get_active_downloads() -> int:
     """返回当前活跃下载数"""
@@ -37,7 +43,8 @@ def unregister_download(task_id: str):
 def try_start_next() -> int:
     """
     尝试启动下一个等待中的任务（不超过 max_concurrent）
-    还会检测卡死的 downloading 任务并重置它们
+    - 按优先级排序（priority DESC, created_at ASC）
+    - 智能重试（指数退避）
     返回: 启动了几个任务
     """
     cfg = get_download_config()
@@ -45,23 +52,29 @@ def try_start_next() -> int:
 
     started = 0
 
-    # 先清理已死的进程 + 检测卡死任务
+    # 先清理已完成的线程 + 检测卡死任务
     with _lock:
         dead = [tid for tid, proc in _running.items() if proc.poll() is not None]
     for tid in dead:
         _running.pop(tid, None)
-        # 检测：进程死了但DB里还是 downloading → 卡死
+        if tid in _order:
+            _order.remove(tid)
+        # 检测：线程死了但DB里还是 downloading → 卡死
         t = get_task(tid)
         if t and t["status"] == "downloading":
-            retry_count = t.get("retry_count", 0)
-            if retry_count < 3:
-                # 重试：重置状态+启动
+            if _should_retry(t):
+                # 重置状态，等待重试（带退避时间）
+                retry_count = t.get("retry_count", 0) + 1
+                backoff = RETRY_BACKOFF[min(retry_count - 1, len(RETRY_BACKOFF) - 1)]
+                retry_after = (datetime.utcnow() + timedelta(seconds=backoff)).isoformat() + "Z"
                 update_task(tid, status="waiting", stage="waiting", progress=0,
-                           speed="", segments="", error="", retry_count=retry_count + 1)
+                           speed="", segments="", error="",
+                           retry_count=retry_count, retry_after=retry_after)
                 started += 1
             else:
-                # 超过3次，不自动重试，等待人工处理
-                update_task(tid, status="failed", stage="failed", error="下载进程异常退出，自动重试3次后放弃")
+                # 超过重试次数，标记失败
+                update_task(tid, status="failed", stage="failed", 
+                          error="下载进程异常退出，自动重试3次后放弃")
 
     with _lock:
         active = len(_running)
@@ -69,28 +82,63 @@ def try_start_next() -> int:
     if active >= max_concurrent:
         return started
 
-    # 找 waiting 任务，按创建时间正序
-    waiting = list_tasks(status="waiting", limit=50)
+    # 找 waiting 任务，按优先级排序（priority DESC, created_at ASC）
+    waiting = list_tasks(status="waiting", limit=50, order_by="priority DESC, created_at ASC")
     for task in waiting:
         if is_downloading(task["id"]):
             continue
+        
+        # 检查是否在退避时间内（智能重试）
+        if not _can_start_now(task):
+            continue
+        
         # 启动下载
-        from ntrh_downloader import start_download
-        proc = start_download(
-            task["id"],
-            task["m3u8_url"],
-            task["headers"],
-            task["key"],
-            task["iv"]
-        )
-        register_download(task["id"], proc)
-        started += 1
-        with _lock:
-            active += 1
-        if active >= max_concurrent:
-            break
+        from app.services.downloader import start_download
+        try:
+            proc = start_download(
+                task["id"],
+                task["m3u8_url"],
+                task["headers"],
+                task["key"],
+                task["iv"]
+            )
+            register_download(task["id"], proc)
+            started += 1
+            with _lock:
+                active += 1
+            if active >= max_concurrent:
+                break
+        except Exception as e:
+            # 启动失败，标记为失败并继续
+            update_task(task["id"], status="failed", stage="failed", error=f"启动下载失败: {e}")
+            print(f"[try_start_next] Failed to start {task['id']}: {e}")
+            continue
 
     return started
+
+
+def _should_retry(task: dict) -> bool:
+    """检查任务是否应该重试"""
+    retry_count = task.get("retry_count", 0)
+    return retry_count < 3
+
+
+def _can_start_now(task: dict) -> bool:
+    """检查任务现在是否可以开始（考虑退避时间）"""
+    retry_count = task.get("retry_count", 0)
+    if retry_count == 0:
+        return True  # 首次尝试，无需等待
+    
+    retry_after = task.get("retry_after")
+    if not retry_after:
+        return True  # 没有退避时间，可以开始
+    
+    try:
+        retry_time = datetime.fromisoformat(retry_after.replace("Z", "+00:00"))
+        now = datetime.utcnow().replace(tzinfo=retry_time.tzinfo)
+        return now >= retry_time
+    except (ValueError, AttributeError):
+        return True  # 解析失败，允许开始
 
 def apply_max_concurrent(new_limit: int) -> int:
     """
@@ -127,7 +175,7 @@ def cleanup_finished():
     for tid in dead:
         unregister_download(tid)
     
-    from task_db import list_tasks, update_task, get_task, get_download_config
+    from app.db.database import list_tasks, update_task, get_task, get_download_config
     from pathlib import Path
     import shutil
     
@@ -157,7 +205,7 @@ def cleanup_finished():
             download_dir = cfg.get("download_dir", "")
             mp4_path = Path(download_dir) / f"{tid}.mp4"
             if mp4_path.exists():
-                from mover import move_to_media_library
+                from app.services.mover import move_to_media_library
                 name = t.get("name", tid) or tid
                 update_task(tid, stage="moving", progress=0, move_speed="", move_elapsed="")
                 move_to_media_library(tid, str(mp4_path), name + ".mp4")
@@ -169,7 +217,7 @@ def cleanup_finished():
         
         # 合并中 → 尝试重新合并
         elif t["stage"] == "merging" or (t["status"] == "failed" and "合并" in t.get("error", "")):
-            from merger import merge_ts_to_mp4
+            from app.services.merger import merge_ts_to_mp4
             cfg = get_download_config()
             download_dir = cfg.get("download_dir", "")
             task_dir = Path(download_dir) / tid
@@ -205,7 +253,7 @@ def cleanup_finished():
                             
                             # 合并后尝试转移
                             name = t.get("name", tid) or tid
-                            from mover import move_to_media_library
+                            from app.services.mover import move_to_media_library
                             update_task(tid, stage="moving", progress=0)
                             move_to_media_library(tid, str(flat), name + ".mp4")
                             print(f"[恢复] {tid}: 启动转移")

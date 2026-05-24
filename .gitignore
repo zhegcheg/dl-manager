@@ -6,5 +6,9 @@ tasks/
 *.fixed
 *.single
 test*.html
-ntrh-021/
 web/nas
+.venv/
+
+.claude
+CLAUDE.md
+.lingma

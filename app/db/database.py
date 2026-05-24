@@ -41,9 +41,20 @@ def init():
             updated_at TEXT NOT NULL,
             completed_at TEXT,
             file TEXT DEFAULT '',
-            final_path TEXT DEFAULT ''
+            final_path TEXT DEFAULT '',
+            priority INTEGER DEFAULT 0,
+            retry_after TEXT DEFAULT ''
         )
     """)
+    # 迁移：为旧数据库添加新字段（如果不存在）
+    try:
+        conn.execute("ALTER TABLE tasks ADD COLUMN priority INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # 字段已存在
+    try:
+        conn.execute("ALTER TABLE tasks ADD COLUMN retry_after TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # 字段已存在
     conn.execute("""
         CREATE TABLE IF NOT EXISTS subscription_sources (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,6 +75,13 @@ def init():
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS download_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS proxy_config (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -92,17 +110,34 @@ def init():
         "INSERT OR IGNORE INTO download_config (key, value, updated_at) VALUES (?, ?, ?)",
         ("thread_count", "8", now)
     )
+    # 默认代理配置
+    conn.execute(
+        "INSERT OR IGNORE INTO proxy_config (key, value, updated_at) VALUES (?, ?, ?)",
+        ("enabled", "false", now)
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO proxy_config (key, value, updated_at) VALUES (?, ?, ?)",
+        ("type", "http", now)
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO proxy_config (key, value, updated_at) VALUES (?, ?, ?)",
+        ("host", "", now)
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO proxy_config (key, value, updated_at) VALUES (?, ?, ?)",
+        ("port", "7890", now)
+    )
     conn.commit()
     conn.close()
 
-def create_task(task_id: str, name: str, m3u8_url: str, headers: str = "", key: str = "", iv: str = "") -> dict:
+def create_task(task_id: str, name: str, m3u8_url: str, headers: str = "", key: str = "", iv: str = "", priority: int = 0) -> dict:
     now = datetime.utcnow().isoformat() + "Z"
     conn = get_db()
     try:
         conn.execute("""
-            INSERT INTO tasks (id, name, m3u8_url, headers, key, iv, status, stage, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'waiting', 'waiting', ?, ?)
-        """, (task_id, name, m3u8_url, headers, key, iv, now, now))
+            INSERT INTO tasks (id, name, m3u8_url, headers, key, iv, status, stage, priority, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'waiting', 'waiting', ?, ?, ?)
+        """, (task_id, name, m3u8_url, headers, key, iv, priority, now, now))
         conn.commit()
     except sqlite3.IntegrityError:
         if key or iv:
@@ -118,13 +153,22 @@ def get_task(task_id: str) -> Optional[dict]:
     conn.close()
     return dict(row) if row else None
 
-def list_tasks(status: str = None, limit: int = 500) -> list:
+def list_tasks(status: str = None, limit: int = 500, order_by: str = None) -> list:
+    """
+    列出任务，支持自定义排序。
+    
+    order_by: 排序字段，默认为 'created_at DESC'
+              队列调度时使用 'priority DESC, created_at ASC'（高优先级优先，同优先级按创建时间）
+    """
     conn = get_db()
+    if order_by is None:
+        order_by = "created_at DESC"
+    
     if status:
-        rows = conn.execute("SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+        rows = conn.execute(f"SELECT * FROM tasks WHERE status = ? ORDER BY {order_by} LIMIT ?",
                           (status, limit)).fetchall()
     else:
-        rows = conn.execute("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        rows = conn.execute(f"SELECT * FROM tasks ORDER BY {order_by} LIMIT ?", (limit,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -284,6 +328,33 @@ def set_download_config(key: str, value: str):
     conn = get_db()
     conn.execute(
         "INSERT INTO download_config (key, value, updated_at) VALUES (?, ?, ?)"
+        " ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?",
+        (key, value, now, value, now)
+    )
+    conn.commit()
+    conn.close()
+
+def get_proxy_config() -> dict:
+    """获取代理配置（启用状态、类型、主机、端口）"""
+    defaults = {
+        "enabled": "false",
+        "type": "http",
+        "host": "",
+        "port": "7890",
+    }
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM proxy_config").fetchall()
+    conn.close()
+    result = defaults.copy()
+    for r in rows:
+        result[r["key"]] = r["value"]
+    return result
+
+def set_proxy_config(key: str, value: str):
+    now = datetime.utcnow().isoformat() + "Z"
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO proxy_config (key, value, updated_at) VALUES (?, ?, ?)"
         " ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?",
         (key, value, now, value, now)
     )

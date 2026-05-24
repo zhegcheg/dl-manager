@@ -1,14 +1,11 @@
 """
 APScheduler 调度器：每日凌晨 4:00 执行 RSS 轮询
 """
-import sys, os
-sys.path.insert(0, os.path.dirname(__file__))
-
 import threading
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from task_db import get_scheduler_config, set_scheduler_config
-from rss_poller import poll_all_sources
+from app.db.database import get_scheduler_config, set_scheduler_config
+from app.services.rss_poller import poll_all_sources
 
 scheduler = BackgroundScheduler()
 _scheduler_lock = threading.Lock()
