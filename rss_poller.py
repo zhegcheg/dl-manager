@@ -63,11 +63,19 @@ def extract_jable_info(video_url: str) -> dict:
     # 去掉特殊字符
     name = re.sub(r'[\/\\\*,:<>"?|]', '', name).strip()
 
-    # 提取 m3u8 URL
+    # 提取 m3u8 URL（保留查询参数，某些 CDN token 是必需的）
     m3u8_match = re.search(r'https?://[^"\'<>\s]+\.m3u8[^"\'<>\s]*', html)
-    m3u8_url = m3u8_match.group(0).split('?')[0] if m3u8_match else ""
+    m3u8_url = m3u8_match.group(0) if m3u8_match else ""
+    m3u8_url = m3u8_url.rstrip('",\\')')
 
     if not m3u8_url:
+        # 尝试从 JSON 转义格式中找
+        json_match = re.search(r'https?://[^"\'<>\s]+\\/[^"\'<>\s]*\.m3u8[^"\'<>\s]*', html)
+        if json_match:
+            m3u8_url = json_match.group(0).replace('\\/', '/').rstrip('",\\')')
+
+    if not m3u8_url:
+        print(f"[extract_jable_info] no m3u8 found in {video_url}, html_len={len(html)}")
         return {}
 
     # 提取 AES 密钥 (从 m3u8 URL 所在 div 或 script 里找 key)
