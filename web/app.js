@@ -14,7 +14,7 @@ createApp({
     const polling = ref(false)
     const starting = ref(false)
     const schedulerConfig = ref({rss_cron: '0 4 * * *', rss_enabled: 'true'})
-    const downloadConfig = ref({download_dir: '', max_concurrent: '2', thread_count: '8'})
+    const downloadConfig = ref({download_dir: '', temp_dir: '', max_concurrent: '2', thread_count: '8'})
     const proxyConfig = ref({enabled: 'false', type: 'http', host: '', port: '7890'})
     const newSource = ref({name:'', url:'', feed_type: 'jable'})
     const deleteTarget = ref(null)
@@ -23,6 +23,11 @@ createApp({
     const addUrl = ref('')
     const adding = ref(false)
     const addMsg = ref('')
+    const addMode = ref('jable')
+    const addM3u8Url = ref('')
+    const addM3u8Name = ref('')
+    const addM3u8Headers = ref('')
+    const addDownloadDir = ref('')
     const configSaved = ref('')
     const configSaving = ref(false)
     const proxySaved = ref('')
@@ -173,7 +178,7 @@ createApp({
       try { const r = await fetch('/api/config'); const d = await r.json();
         const data = d.data || {}
         schedulerConfig.value = {rss_cron: data.rss_cron || '0 4 * * *', rss_enabled: data.rss_enabled || 'true'}
-        downloadConfig.value = {download_dir: data.download_dir || '', max_concurrent: data.max_concurrent || '2', thread_count: data.thread_count || '8'}
+        downloadConfig.value = {download_dir: data.download_dir || '', temp_dir: data.temp_dir || '', max_concurrent: data.max_concurrent || '2', thread_count: data.thread_count || '8'}
         proxyConfig.value = {enabled: data.enabled || 'false', type: data.type || 'http', host: data.host || '', port: data.port || '7890'}
       } catch(e) {}
     }
@@ -216,6 +221,7 @@ createApp({
       try {
         const body = { max_concurrent: mc, thread_count: tc }
         if (downloadConfig.value.download_dir) body.download_dir = downloadConfig.value.download_dir
+        if (downloadConfig.value.temp_dir) body.temp_dir = downloadConfig.value.temp_dir
         const r = await fetch('/api/config/apply', {
           method:'POST',
           headers:{'Content-Type':'application/json'},
@@ -355,20 +361,44 @@ createApp({
       logContent.value = ''
     }
 
+    const canAddVideo = computed(() => {
+      if (adding.value) return false
+      if (addMode.value === 'jable') return !!addUrl.value
+      return !!addM3u8Url.value
+    })
+
     async function doAddVideo() {
-      if (!addUrl.value || adding.value) return
+      if (!canAddVideo.value) return
       adding.value = true
       addMsg.value = ''
       try {
-        const r = await fetch('/api/tasks/from-url', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({url: addUrl.value})
-        })
+        let r
+        if (addMode.value === 'jable') {
+          r = await fetch('/api/tasks/from-url', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({url: addUrl.value, download_dir: addDownloadDir.value})
+          })
+        } else {
+          r = await fetch('/api/tasks/from-m3u8', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              m3u8_url: addM3u8Url.value,
+              name: addM3u8Name.value,
+              headers: addM3u8Headers.value,
+              download_dir: addDownloadDir.value
+            })
+          })
+        }
         const d = await r.json()
         if (!r.ok) throw new Error((d.detail || d.message || '添加失败').replace(/^Error:\s*/, ''))
         addMsg.value = '添加成功！'
         addUrl.value = ''
+        addM3u8Url.value = ''
+        addM3u8Name.value = ''
+        addM3u8Headers.value = ''
+        addDownloadDir.value = ''
         await fetchTasks()
         setTimeout(() => { showAddModal.value = false; addMsg.value = '' }, 1500)
       } catch(e) {
@@ -396,7 +426,8 @@ createApp({
              configSaved, configSaving, saveDownloadConfig, saveSchedulerConfig, retryTask, startTask, stopTask,
              selected, selectedCount, allSelected, canBatchStart, canBatchStop, canBatchRetry, viewMode, page, pageSize, totalPages, showPagination, goPage, setPageSize,
              toggleSelect, toggleSelectAll, batchStart, batchStop, batchRetry, batchDelete, toggleViewMode,
-             showAddModal, addUrl, adding, addMsg, doAddVideo,
+             showAddModal, addUrl, adding, addMsg, doAddVideo, canAddVideo,
+             addMode, addM3u8Url, addM3u8Name, addM3u8Headers, addDownloadDir,
              proxyConfig, proxySaved, proxySaving, saveProxyConfig }
   }
 }).mount('#app')

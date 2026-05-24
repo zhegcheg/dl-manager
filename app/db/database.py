@@ -55,6 +55,10 @@ def init():
         conn.execute("ALTER TABLE tasks ADD COLUMN retry_after TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass  # 字段已存在
+    try:
+        conn.execute("ALTER TABLE tasks ADD COLUMN download_dir TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # 字段已存在
     conn.execute("""
         CREATE TABLE IF NOT EXISTS subscription_sources (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +114,10 @@ def init():
         "INSERT OR IGNORE INTO download_config (key, value, updated_at) VALUES (?, ?, ?)",
         ("thread_count", "8", now)
     )
+    conn.execute(
+        "INSERT OR IGNORE INTO download_config (key, value, updated_at) VALUES (?, ?, ?)",
+        ("temp_dir", str(Path.home() / ".jable-dl-server" / "temp"), now)
+    )
     # 默认代理配置
     conn.execute(
         "INSERT OR IGNORE INTO proxy_config (key, value, updated_at) VALUES (?, ?, ?)",
@@ -130,14 +138,14 @@ def init():
     conn.commit()
     conn.close()
 
-def create_task(task_id: str, name: str, m3u8_url: str, headers: str = "", key: str = "", iv: str = "", priority: int = 0) -> dict:
+def create_task(task_id: str, name: str, m3u8_url: str, headers: str = "", key: str = "", iv: str = "", priority: int = 0, download_dir: str = "") -> dict:
     now = datetime.utcnow().isoformat() + "Z"
     conn = get_db()
     try:
         conn.execute("""
-            INSERT INTO tasks (id, name, m3u8_url, headers, key, iv, status, stage, priority, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'waiting', 'waiting', ?, ?, ?)
-        """, (task_id, name, m3u8_url, headers, key, iv, priority, now, now))
+            INSERT INTO tasks (id, name, m3u8_url, headers, key, iv, status, stage, priority, download_dir, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'waiting', 'waiting', ?, ?, ?, ?)
+        """, (task_id, name, m3u8_url, headers, key, iv, priority, download_dir, now, now))
         conn.commit()
     except sqlite3.IntegrityError:
         if key or iv:
@@ -242,6 +250,10 @@ def get_task_log_path(task_id: str) -> Path:
 def get_task_dir(task_id: str) -> Path:
     cfg = get_download_config()
     base_dir = cfg.get("download_dir", str(Path.home() / ".jable-dl-server" / "tasks"))
+    # 检查任务是否有自定义 download_dir
+    task = get_task(task_id)
+    if task and task.get("download_dir"):
+        base_dir = task["download_dir"]
     task_dir = Path(base_dir) / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
     return task_dir
@@ -312,6 +324,7 @@ def get_download_config() -> dict:
     """获取下载配置（下载目录、最大并发数、线程数）"""
     defaults = {
         "download_dir": str(Path.home() / ".jable-dl-server" / "tasks"),
+        "temp_dir": str(Path.home() / ".jable-dl-server" / "temp"),
         "max_concurrent": "2",
         "thread_count": "8",
     }

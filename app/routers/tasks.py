@@ -29,6 +29,7 @@ class TaskCreate(BaseModel):
     headers: str = ""
     key: str = ""
     iv: str = ""
+    download_dir: str = ""
 
 
 @router.get("/api/tasks")
@@ -50,7 +51,7 @@ def get_task_detail(task_id: str):
 @router.post("/api/tasks")
 def create_new_task(body: TaskCreate):
     task = create_task(body.id, body.name, body.m3u8_url,
-                       body.headers, body.key, body.iv)
+                       body.headers, body.key, body.iv, download_dir=body.download_dir)
     return {"data": [task]}
 
 
@@ -61,6 +62,7 @@ def create_task_from_url(body: dict):
     video_url = body.get("url") or body.get("video_url")
     if not video_url:
         raise HTTPException(400, "url or video_url required")
+    download_dir = body.get("download_dir", "")
     import traceback
     try:
         info = extract_jable_info(video_url)
@@ -74,7 +76,34 @@ def create_task_from_url(body: dict):
         info["key"] = key
         info["iv"] = iv
     task = create_task(info["id"], info["name"], info["m3u8_url"],
-                       info.get("headers", ""), info.get("key", ""), info.get("iv", ""))
+                       info.get("headers", ""), info.get("key", ""), info.get("iv", ""),
+                       download_dir=download_dir)
+    try_start_next()
+    return {"data": [task]}
+
+
+@router.post("/api/tasks/from-m3u8")
+def create_task_from_m3u8(body: dict):
+    """直接提供 m3u8 URL 创建任务，无需解析页面"""
+    import uuid
+    m3u8_url = body.get("m3u8_url") or body.get("url")
+    if not m3u8_url:
+        raise HTTPException(400, "m3u8_url required")
+    name = body.get("name", "").strip()
+    if not name:
+        # 从 URL 提取名称
+        from urllib.parse import urlparse
+        parsed = urlparse(m3u8_url)
+        path_parts = parsed.path.strip('/').split('/')
+        name = path_parts[-1].replace('.m3u8', '') if path_parts else str(uuid.uuid4())[:8]
+    task_id = body.get("id", "").strip()
+    if not task_id:
+        task_id = str(uuid.uuid4())[:12]
+    headers = body.get("headers", "")
+    key = body.get("key", "")
+    iv = body.get("iv", "")
+    download_dir = body.get("download_dir", "")
+    task = create_task(task_id, name, m3u8_url, headers, key, iv, download_dir=download_dir)
     try_start_next()
     return {"data": [task]}
 
@@ -158,6 +187,18 @@ def remove_task(task_id: str):
     flat_mp4 = Path(get_download_config().get("download_dir", "")) / f"{task_id}.mp4"
     if flat_mp4.exists():
         flat_mp4.unlink()
+    # 清理 temp_dir 中的残留
+    cfg = get_download_config()
+    temp_dir = cfg.get("temp_dir", "")
+    if temp_dir:
+        import glob
+        for f in glob.glob(f"{temp_dir}/{task_id}*"):
+            try:
+                p = Path(f)
+                if p.is_file():
+                    p.unlink()
+            except Exception:
+                pass
     log_path = get_task_log_path(task_id)
     if log_path.exists():
         log_path.unlink()

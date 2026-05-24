@@ -102,6 +102,8 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
     """
     启动 yt-dlp 下载任务
     
+    流程: yt-dlp 下载分片到 temp_dir -> 合并为 MP4 -> 移动到 download_dir -> 转移到 NAS
+    
     参数:
         task_id: 任务 ID
         m3u8_url: m3u8 播放列表 URL
@@ -114,17 +116,24 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
     """
     cfg = get_download_config()
     download_dir = cfg.get("download_dir", str(Path.home() / ".jable-dl-server" / "tasks"))
+    temp_dir = cfg.get("temp_dir", str(Path.home() / ".jable-dl-server" / "temp"))
     thread_count = int(cfg.get("thread_count", "8"))
+    
+    # 检查任务是否有自定义 download_dir
+    task = get_task(task_id)
+    if task and task.get("download_dir"):
+        download_dir = task["download_dir"]
     
     # 确保目录存在
     Path(download_dir).mkdir(parents=True, exist_ok=True)
+    Path(temp_dir).mkdir(parents=True, exist_ok=True)
     
     # 创建下载线程对象
     download_thread = DownloadThread(threading.Thread(target=_dummy), task_id)
     
-    # 构建 yt-dlp 选项
+    # 构建 yt-dlp 选项 — 分片下载到 temp_dir
     ydl_opts = {
-        'outtmpl': f'{download_dir}/{task_id}.%(ext)s',
+        'outtmpl': f'{temp_dir}/{task_id}.%(ext)s',
         'concurrent_fragment_downloads': thread_count,  # 多线程分片下载
         'continuedl': True,  # 断点续传
         'merge_output_format': 'mp4',  # 自动合并为 MP4
@@ -188,20 +197,32 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
                 
                 # 下载成功
                 if info:
-                    # 获取输出文件路径
+                    # 获取输出文件路径（在 temp_dir 中）
                     filename = ydl.prepare_filename(info)
                     mp4_path = Path(filename).with_suffix('.mp4')
                     
                     if mp4_path.exists() and mp4_path.stat().st_size > 0:
+                        # 从 temp_dir 移动到 download_dir
+                        final_mp4 = Path(download_dir) / mp4_path.name
+                        try:
+                            shutil.move(str(mp4_path), str(final_mp4))
+                        except Exception as move_err:
+                            # 如果移动失败（跨设备），回退到复制
+                            shutil.copy2(str(mp4_path), str(final_mp4))
+                            mp4_path.unlink()
+                        
+                        # 清理 temp_dir 中可能残留的分片文件
+                        _cleanup_temp(temp_dir, task_id)
+                        
                         update_task(task_id, status="completed", stage="completed",
-                                  progress=100, file=str(mp4_path))
+                                  progress=100, file=str(final_mp4))
                         
                         # 启动异步转移到 NAS
                         t = get_task(task_id)
                         if t:
                             update_task(task_id, stage="moving", progress=0, move_speed="", move_elapsed="")
                             from app.services.mover import move_to_media_library
-                            move_to_media_library(task_id, str(mp4_path), t["name"] + ".mp4")
+                            move_to_media_library(task_id, str(final_mp4), t["name"] + ".mp4")
                         
                         download_thread.set_exit_code(0)
                         return
@@ -232,6 +253,21 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
     worker.start()
     
     return download_thread
+
+
+def _cleanup_temp(temp_dir: str, task_id: str):
+    """清理 temp_dir 中指定 task_id 的残留分片文件"""
+    import glob
+    pattern = f"{temp_dir}/{task_id}*"
+    for f in glob.glob(pattern):
+        try:
+            p = Path(f)
+            if p.is_file():
+                p.unlink()
+            elif p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def _dummy():

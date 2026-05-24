@@ -194,6 +194,10 @@
         <input v-model="downloadConfig.download_dir" placeholder="/home/zhegcheg/imovie/tasks" style="width:300px;">
       </div>
       <div class="item">
+        <label>临时目录 <span style="color:#888;font-size:12px;">(分片下载后合并，再移动到下载目录)</span></label>
+        <input v-model="downloadConfig.temp_dir" placeholder="/home/zhegcheg/imovie/temp" style="width:300px;">
+      </div>
+      <div class="item">
         <label>最大并发数 <span style="color:#888;font-size:12px;">(上限10)</span></label>
         <input v-model="downloadConfig.max_concurrent" placeholder="2" type="number" min="1" max="10" style="width:80px;">
       </div>
@@ -303,15 +307,45 @@
   <!-- 添加视频弹窗 -->
   <div v-if="showAddModal" class="modal-mask" @click.self="showAddModal=false">
     <div class="modal">
-      <div class="modal-title">添加 Jable 视频</div>
-      <div class="form-group">
+      <div class="modal-title">添加视频</div>
+      <!-- 模式切换 -->
+      <div class="form-group" style="display:flex;gap:12px;margin-bottom:8px;">
+        <label style="cursor:pointer;display:flex;align-items:center;gap:4px;">
+          <input type="radio" v-model="addMode" value="jable"> Jable 页面
+        </label>
+        <label style="cursor:pointer;display:flex;align-items:center;gap:4px;">
+          <input type="radio" v-model="addMode" value="m3u8"> 直接 m3u8
+        </label>
+      </div>
+      <!-- Jable 模式 -->
+      <div v-if="addMode==='jable'" class="form-group">
         <label>视频页面 URL</label>
         <input type="text" v-model="addUrl" placeholder="https://jable.tv/videos/xxxx/" @keyup.enter="doAddVideo">
+        <div class="hint">输入 Jable 视频页面地址，自动抓取标题和 m3u8</div>
       </div>
-      <div class="form-group hint">直接输入 Jable 视频页面地址，自动抓取标题和 m3u8</div>
+      <!-- m3u8 直输模式 -->
+      <div v-if="addMode==='m3u8'">
+        <div class="form-group">
+          <label>m3u8 URL</label>
+          <input type="text" v-model="addM3u8Url" placeholder="https://example.com/video/index.m3u8" @keyup.enter="doAddVideo">
+        </div>
+        <div class="form-group">
+          <label>视频名称 <span style="color:#888;font-size:12px;">(可选，留空自动提取)</span></label>
+          <input type="text" v-model="addM3u8Name" placeholder="视频名称">
+        </div>
+        <div class="form-group">
+          <label>自定义 Headers <span style="color:#888;font-size:12px;">(可选，每行一个: Key: Value)</span></label>
+          <textarea v-model="addM3u8Headers" placeholder="Referer: https://example.com&#10;User-Agent: ..." rows="2" style="width:100%;background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:6px;color:#e0e0e0;font-size:13px;resize:vertical;"></textarea>
+        </div>
+      </div>
+      <!-- 下载目录覆盖（两种模式通用） -->
+      <div class="form-group">
+        <label>下载目录 <span style="color:#888;font-size:12px;">(留空使用全局设置)</span></label>
+        <input type="text" v-model="addDownloadDir" placeholder="">
+      </div>
       <div class="modal-actions">
         <button class="btn sm" @click="showAddModal=false">取消</button>
-        <button class="btn sm" :disabled="!addUrl || adding" @click="doAddVideo" style="border-color:#ff6b9d;color:#ff6b9d;">[[ adding ? '添加中...' : '添加' ]]</button>
+        <button class="btn sm" :disabled="!canAddVideo || adding" @click="doAddVideo" style="border-color:#ff6b9d;color:#ff6b9d;">[[ adding ? '添加中...' : '添加' ]]</button>
       </div>
       <div v-if="addMsg" class="form-group" :class="addMsg.indexOf('失败')>=0?'error':'success'">[[ addMsg ]]</div>
     </div>
