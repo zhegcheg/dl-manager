@@ -169,7 +169,7 @@ def apply_max_concurrent(new_limit: int) -> int:
 
 
 def cleanup_finished():
-    """服务启动时恢复状态：重置卡死任务、恢复合并/转移"""
+    """服务启动时恢复状态：重置卡死任务、恢复合并/转移（非阻塞）"""
     with _lock:
         dead = [tid for tid, proc in _running.items() if proc.poll() is not None]
     for tid in dead:
@@ -179,89 +179,158 @@ def cleanup_finished():
     from pathlib import Path
     import shutil
     
-    for t in list_tasks():
+    all_tasks = list_tasks()
+    need_recover = []
+    
+    for t in all_tasks:
         tid = t["id"]
         
-        # 下载中 → 重置为 waiting（进程已死）
+        # 下载中 → 重置为 waiting（进程已死，yt-dlp 支持断点续传）
         if t["status"] == "downloading":
             update_task(tid, status="waiting", stage="waiting", progress=0,
                        speed="", segments="", error="")
-            print(f"[恢复] {tid}: 重置 downloading → waiting")
+            print(f"[恢复] {tid}: 下载中断 → 重置为 waiting（将通过 try_start_next 自动续传）")
         
-        # 转移中且已完成复制（move=done）→ 检查 final_path 并标记完成
+        # 转移中且已完成复制（move_speed=done）→ 检查 final_path 并标记完成
         elif t["stage"] == "moving" and t.get("move_speed") == "done":
             fp = t.get("final_path", "")
             if fp and Path(fp).exists():
                 update_task(tid, stage="completed", progress=100)
                 print(f"[恢复] {tid}: 转移已完成，标记完成")
             else:
-                # 没有 final_path 或文件不存在，重新转移
-                update_task(tid, stage="moving", progress=0, move_speed="", move_elapsed="")
-                print(f"[恢复] {tid}: 重新启动转移")
+                # final_path 不存在，尝试从 download_dir 重新转移
+                need_recover.append(("move", t))
+                print(f"[恢复] {tid}: 转移标记完成但目标文件缺失，加入重新转移队列")
         
-        # 转移中（未完成）→ 重新启动转移
-        elif t["stage"] == "moving" and not t.get("move_speed") == "done":
-            cfg = get_download_config()
-            download_dir = cfg.get("download_dir", "")
-            mp4_path = Path(download_dir) / f"{tid}.mp4"
-            if mp4_path.exists():
-                from app.services.mover import move_to_media_library
-                name = t.get("name", tid) or tid
-                update_task(tid, stage="moving", progress=0, move_speed="", move_elapsed="")
-                move_to_media_library(tid, str(mp4_path), name + ".mp4")
-                print(f"[恢复] {tid}: 重启转移")
-            else:
-                # 本地 mp4 不存在（可能已删除），标记失败
-                update_task(tid, status="failed", stage="failed", error="转移中断：源文件不存在")
-                print(f"[恢复] {tid}: 源文件不存在，标记失败")
+        # 转移中（未完成）→ 加入恢复队列
+        elif t["stage"] == "moving":
+            need_recover.append(("move", t))
+            print(f"[恢复] {tid}: 转移中断，加入恢复队列")
         
-        # 合并中 → 尝试重新合并
-        elif t["stage"] == "merging" or (t["status"] == "failed" and "合并" in t.get("error", "")):
-            from app.services.merger import merge_ts_to_mp4
-            cfg = get_download_config()
-            download_dir = cfg.get("download_dir", "")
-            task_dir = Path(download_dir) / tid
-            
-            # 搜索分片目录
-            seg_dir = None
-            for d in [task_dir / "0____", task_dir / tid / "0____"]:
-                if d.exists():
-                    seg_dir = d
+        # 合并中（含 re-encode）→ 加入恢复队列
+        elif t["stage"] in ("merging", "merging_reencode"):
+            need_recover.append(("merge", t))
+            print(f"[恢复] {tid}: 合并中断(stage={t['stage']})，加入恢复队列")
+        
+        # 合并失败 → 也尝试恢复
+        elif t["status"] == "failed" and "合并" in t.get("error", ""):
+            need_recover.append(("merge", t))
+            print(f"[恢复] {tid}: 合并失败，加入恢复队列重试")
+    
+    # 非阻塞恢复：在后台线程中执行耗时的合并/转移操作
+    if need_recover:
+        t = threading.Thread(target=_recover_tasks, args=(need_recover,), daemon=True)
+        t.start()
+        print(f"[恢复] 已启动后台恢复线程，共 {len(need_recover)} 个任务待恢复")
+
+
+def _recover_tasks(recover_list: list):
+    """后台线程：逐个恢复合并/转移任务（避免阻塞启动）"""
+    import shutil
+    from pathlib import Path
+    from app.db.database import update_task, get_download_config
+    from app.services.merger import merge_ts_to_mp4
+    from app.services.mover import move_to_media_library
+    
+    for action, t in recover_list:
+        tid = t["id"]
+        try:
+            if action == "merge":
+                _recover_merge(tid, t)
+            elif action == "move":
+                _recover_move(tid, t)
+        except Exception as e:
+            print(f"[恢复] {tid}: 恢复失败 - {e}")
+            update_task(tid, status="failed", stage="failed", error=f"恢复失败: {e}")
+
+
+def _recover_merge(tid: str, t: dict):
+    """恢复合并任务"""
+    import shutil
+    from pathlib import Path
+    from app.db.database import update_task, get_download_config
+    from app.services.merger import merge_ts_to_mp4
+    from app.services.mover import move_to_media_library
+    
+    cfg = get_download_config()
+    download_dir = cfg.get("download_dir", "")
+    task_dir = Path(download_dir) / tid
+    
+    # 搜索分片目录
+    seg_dir = None
+    for d in [task_dir / "0____", task_dir / tid / "0____"]:
+        if d.exists():
+            seg_dir = d
+            break
+    if not seg_dir and task_dir.exists():
+        for sub in sorted(task_dir.iterdir()):
+            if sub.is_dir():
+                check = sub / "0____"
+                if check.exists():
+                    seg_dir = check
                     break
-            if not seg_dir:
-                if task_dir.exists():
-                    for sub in sorted(task_dir.iterdir()):
-                        if sub.is_dir():
-                            check = sub / "0____"
-                            if check.exists():
-                                seg_dir = check
-                                break
-            
-            if seg_dir:
-                ts_files = list(seg_dir.glob("[0-9]*.ts"))
-                if ts_files:
-                    print(f"[恢复] {tid}: 发现 {len(ts_files)} 片，尝试合并")
-                    update_task(tid, stage="merging", progress=0)
-                    flat = Path(download_dir) / f"{tid}.mp4"
-                    ok, result = merge_ts_to_mp4(seg_dir, tid, flat)
-                    if ok:
-                        if flat.exists() and flat.stat().st_size > 0:
-                            update_task(tid, status="completed", stage="completed", progress=100, file=str(flat))
-                            if task_dir.exists():
-                                shutil.rmtree(task_dir, ignore_errors=True)
-                            print(f"[恢复] {tid}: 合并成功")
-                            
-                            # 合并后尝试转移
-                            name = t.get("name", tid) or tid
-                            from app.services.mover import move_to_media_library
-                            update_task(tid, stage="moving", progress=0)
-                            move_to_media_library(tid, str(flat), name + ".mp4")
-                            print(f"[恢复] {tid}: 启动转移")
-                        else:
-                            update_task(tid, status="failed", stage="failed", error=f"合并后文件不存在")
-                    else:
-                        update_task(tid, status="failed", stage="failed", error=f"合并失败: {result}")
-                else:
-                    update_task(tid, status="failed", stage="failed", error="分片不存在")
-            else:
-                update_task(tid, status="failed", stage="failed", error="分片目录不存在")
+    
+    if not seg_dir:
+        update_task(tid, status="failed", stage="failed", error="分片目录不存在，无法恢复合并")
+        print(f"[恢复] {tid}: 分片目录不存在")
+        return
+    
+    ts_files = list(seg_dir.glob("[0-9]*.ts"))
+    if not ts_files:
+        update_task(tid, status="failed", stage="failed", error="分片文件不存在，无法恢复合并")
+        print(f"[恢复] {tid}: 无 TS 分片文件")
+        return
+    
+    print(f"[恢复] {tid}: 发现 {len(ts_files)} 个分片，开始合并...")
+    update_task(tid, stage="merging", progress=0)
+    flat = Path(download_dir) / f"{tid}.mp4"
+    ok, result = merge_ts_to_mp4(seg_dir, tid, flat)
+    
+    if ok and flat.exists() and flat.stat().st_size > 0:
+        update_task(tid, status="completed", stage="completed", progress=100, file=str(flat))
+        if task_dir.exists():
+            shutil.rmtree(task_dir, ignore_errors=True)
+        print(f"[恢复] {tid}: 合并成功")
+        
+        # 合并后尝试转移
+        name = t.get("name", tid) or tid
+        update_task(tid, stage="moving", progress=0)
+        move_to_media_library(tid, str(flat), name + ".mp4")
+        print(f"[恢复] {tid}: 启动转移")
+    else:
+        update_task(tid, status="failed", stage="failed", error=f"合并失败: {result}")
+        print(f"[恢复] {tid}: 合并失败 - {result}")
+
+
+def _recover_move(tid: str, t: dict):
+    """恢复转移任务"""
+    import shutil
+    from pathlib import Path
+    from app.db.database import update_task, get_download_config
+    from app.services.mover import move_to_media_library
+    
+    cfg = get_download_config()
+    download_dir = cfg.get("download_dir", "")
+    temp_dir = cfg.get("temp_dir", "")
+    mp4_path = Path(download_dir) / f"{tid}.mp4"
+    
+    # 如果 download_dir 中没有，检查 temp_dir（可能在移动前崩溃）
+    if not mp4_path.exists() and temp_dir:
+        temp_mp4 = Path(temp_dir) / f"{tid}.mp4"
+        if temp_mp4.exists():
+            # 先从 temp_dir 移到 download_dir
+            try:
+                shutil.move(str(temp_mp4), str(mp4_path))
+            except Exception:
+                shutil.copy2(str(temp_mp4), str(mp4_path))
+                temp_mp4.unlink()
+            print(f"[恢复] {tid}: 从 temp_dir 恢复到 download_dir")
+    
+    if mp4_path.exists():
+        name = t.get("name", tid) or tid
+        update_task(tid, stage="moving", progress=0, move_speed="", move_elapsed="")
+        move_to_media_library(tid, str(mp4_path), name + ".mp4")
+        print(f"[恢复] {tid}: 重启转移")
+    else:
+        update_task(tid, status="failed", stage="failed", error="转移中断：源文件不存在")
+        print(f"[恢复] {tid}: 本地 mp4 不存在(download_dir/temp_dir)，标记失败")
