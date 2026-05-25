@@ -1,34 +1,27 @@
 """
-Jable RSS 轮询 + 多订阅源支持
+通用订阅源轮询引擎
 
-feed_type='jable': 从 Jable 页面提取 m3u8_url（无官方 RSS）
-  - 从页面 <meta property="og:url"> 提取 video_id
-  - 从页面 title 提取标题
-  - 从页面 m3u8 URL 提取 m3u8_url + AES 密钥
-
-feed_type='rss': 标准 RSS（6dylan6_jdpro 等）
-  - enclosure 或 link 里的 URL 即为视频页 URL
-  - 从视频页 URL 提取 video_id，再获取 m3u8_url
+feed_type='webpage': 从网页提取 m3u8（通过订阅源配置的解析规则）
+feed_type='rss': 标准 RSS 订阅
+feed_type='m3u8_direct': 直接 m3u8 URL（无需轮询）
 """
 import re
 import time
 import sqlite3
-import subprocess
 import threading
 import urllib.request
 import urllib.error
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime
 
 from app.db.database import get_db, get_task, create_task, update_task, get_proxy_config
 
-# Jable 页面解析
-JABLE_PAGE_HEADERS = {
+DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml",
 }
 
-REFERER = "Referer: https://jable.tv/\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36\r\n"
 
 def _get_proxy_opener():
     """根据 proxy_config 返回配置了代理的 urllib opener，或 None"""
@@ -51,14 +44,26 @@ def _get_proxy_opener():
         print(f"[_get_proxy_opener] Failed to build proxy opener: {e}")
         return None
 
-def fetch_jable_page(video_url: str, timeout: int = 15) -> str:
-    """抓取 Jable 视频页面 HTML（使用 urllib 兼容 Windows/Linux）"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml",
-    }
+
+def _build_headers(referer: str = "", custom_headers: str = "") -> dict:
+    """合并默认 headers + Referer + 自定义 headers"""
+    headers = dict(DEFAULT_HEADERS)
+    if referer:
+        headers["Referer"] = referer
+    if custom_headers:
+        for line in custom_headers.split("\n"):
+            line = line.strip()
+            if ":" in line:
+                k, v = line.split(":", 1)
+                headers[k.strip()] = v.strip()
+    return headers
+
+
+def _fetch_url(url: str, referer: str = "", custom_headers: str = "", timeout: int = 15) -> str:
+    """通用 URL 请求，支持代理"""
+    headers = _build_headers(referer, custom_headers)
     try:
-        req = urllib.request.Request(video_url, headers=headers)
+        req = urllib.request.Request(url, headers=headers)
         opener = _get_proxy_opener()
         if opener:
             with opener.open(req, timeout=timeout) as resp:
@@ -67,112 +72,87 @@ def fetch_jable_page(video_url: str, timeout: int = 15) -> str:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.read().decode('utf-8', errors='replace')
     except Exception as e:
-        print(f"[fetch_jable_page] Failed to fetch {video_url}: {e}")
+        print(f"[_fetch_url] Failed to fetch {url}: {e}")
         return ""
 
-def extract_jable_info(video_url: str) -> dict:
-    """
-    从 Jable 视频页面提取:
-      - video_id
-      - name (标题)
-      - m3u8_url
-      - key, iv (AES 加密密钥)
-      - headers
-    """
-    html = fetch_jable_page(video_url)
-    if not html:
-        return {}
 
-    # 提取 title
-    title_match = re.search(r'<title>([^<]+)</title>', html)
-    raw_title = title_match.group(1).strip() if title_match else ""
-    # 清理标题：去掉后缀 " - Jable.TV..."
-    name = re.sub(r'\s*-\s*Jable\.TV.*$', '', raw_title).strip()
-    name = re.sub(r'\s*\|\s*免费高清AV在線看\s*\|\s*J片\s*AV看到飽\s*$', '', name).strip()
-    # 去掉特殊字符
+def _extract_text(html: str, pattern: str) -> str:
+    """用正则从 HTML 提取第一个捕获组"""
+    if not pattern or not html:
+        return ""
+    m = re.search(pattern, html)
+    return m.group(1).strip() if m else ""
+
+
+def _clean_title(title: str) -> str:
+    """通用标题清理"""
+    if not title:
+        return ""
+    # 去掉末尾的 " - SiteName" 或 " | SiteName"（要求分隔符前后有空格，避免误删 HMN-853 这种番号）
+    name = re.sub(r'\s+[-|]\s+[^|]+$', '', title).strip()
+    # 如果上面没匹配到，再尝试末尾单独的 " |" 分隔
+    if name == title.strip():
+        name = re.sub(r'\s*\|\s*[^|]+$', '', title).strip()
+    # 去掉文件系统不友好字符
     name = re.sub(r'[\/\\\*,:<>"?|]', '', name).strip()
+    return name
 
-    # 提取 m3u8 URL（保留查询参数，某些 CDN token 是必需的）
-    m3u8_match = re.search(r'https?://[^"\'<>\s]+\.m3u8[^"\'<>\s]*', html)
-    m3u8_url = m3u8_match.group(0) if m3u8_match else ""
-    m3u8_url = m3u8_url.rstrip('",\\')
 
-    if not m3u8_url:
-        # 尝试从 JSON 转义格式中找
-        json_match = re.search(r'https?://[^"\'<>\s]+\\/[^"\'<>\s]*\.m3u8[^"\'<>\s]*', html)
-        if json_match:
-            m3u8_url = json_match.group(0).replace('\\/', '/').rstrip('",\\')
+def _extract_m3u8(html: str, pattern: str = "") -> str:
+    """从页面提取 m3u8 URL，支持自定义正则"""
+    if pattern:
+        m = re.search(pattern, html)
+        if m:
+            # 如果有捕获组，取第一个捕获组；否则取完整匹配
+            return (m.group(1) if m.lastindex else m.group(0)).rstrip('",\\')
+    # 通用 fallback
+    m = re.search(r'https?://[^"\'<>\s]+\.m3u8[^"\'<>\s]*', html)
+    if m:
+        return m.group(0).rstrip('",\\')
+    # JSON 转义格式
+    m = re.search(r'https?://[^"\'<>\s]+\\/[^"\'<>\s]*\.m3u8[^"\'<>\s]*', html)
+    if m:
+        return m.group(0).replace('\\/', '/').rstrip('",\\')
+    return ""
 
-    if not m3u8_url:
-        print(f"[extract_jable_info] no m3u8 found in {video_url}, html_len={len(html)}")
-        return {}
 
-    # 提取 AES 密钥 (从 m3u8 URL 所在 div 或 script 里找 key)
-    # 简单策略：从页面里找 #EXT-X-KEY 或 key URI
-    key_match = re.search(r'(?:crypto|key|iv)["\']?\s*[:=]\s*["\']([^"\']+)["\']', html, re.IGNORECASE)
-    key = ""
-    iv = ""
+def _extract_video_id(video_url: str, pattern: str = "") -> str:
+    """从视频 URL 提取 video_id"""
+    if pattern:
+        m = re.search(pattern, video_url)
+        if m:
+            return m.group(1)
+    # fallback: 取 URL 最后一段路径
+    from urllib.parse import urlparse
+    parsed = urlparse(video_url)
+    parts = [p for p in parsed.path.strip('/').split('/') if p]
+    return parts[-1] if parts else video_url
 
-    # 尝试从 mushroomtrack 域名相关脚本找 AES 密钥
-    # 常见模式：acd275713d84de10.ts (key 文件名即 16 字节 hex)
-    aes_key_match = re.search(r'acd([a-f0-9]{24})\.ts', html)
-    if aes_key_match:
-        full_hex = "acd" + aes_key_match.group(1)
-        key = full_hex[:32]
 
-    iv_match = re.search(r'0x([a-f0-9]{32})', html)
-    if iv_match:
-        iv = "0x" + iv_match.group(1)
-
-    # video_id 从 URL 提取
-    video_id_match = re.search(r'/videos/([^/]+)', video_url)
-    video_id = video_id_match.group(1) if video_id_match else ""
-
-    return {
-        "id": video_id,
-        "name": name or video_id,
-        "m3u8_url": m3u8_url,
-        "key": key,
-        "iv": iv,
-        "headers": REFERER
-    }
-
-def fetch_jable_m3u8_key(m3u8_url: str) -> tuple[str, str]:
-    """从 m3u8 manifest 提取 AES-128 key URI 和 IV"""
-    opener = None
-    try:
-        req = urllib.request.Request(m3u8_url, headers={
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://jable.tv/",
-        })
-        opener = _get_proxy_opener()
-        if opener:
-            with opener.open(req, timeout=15) as resp:
-                manifest = resp.read().decode('utf-8', errors='replace')
-        else:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                manifest = resp.read().decode('utf-8', errors='replace')
-    except Exception:
-        manifest = ""
+def _extract_aes_from_manifest(m3u8_url: str, referer: str = "") -> tuple:
+    """从 m3u8 manifest 提取 AES-128 key 和 IV"""
+    manifest = _fetch_url(m3u8_url, referer=referer)
+    if not manifest:
+        return "", ""
 
     key, iv = "", ""
     key_uri_match = re.search(r'URI="([^"]+)"', manifest)
     if key_uri_match:
-        # 从 m3u8_url 提取 base path，构建完整 key URL
         base_url = m3u8_url.rsplit('/', 1)[0]
         key_url = base_url + '/' + key_uri_match.group(1)
         try:
-            key_req = urllib.request.Request(key_url, headers={
-                "Referer": "https://jable.tv/",
-            })
+            # 使用 binary 模式读取 key 文件
+            headers = _build_headers(referer)
+            key_req = urllib.request.Request(key_url, headers=headers)
+            opener = _get_proxy_opener()
             if opener:
                 with opener.open(key_req, timeout=15) as resp:
-                    key_hex = resp.read().hex()
-                    key = key_hex[:32] if len(key_hex) >= 32 else key_hex
+                    key_bytes = resp.read()
+                    key = key_bytes.hex()[:32]
             else:
                 with urllib.request.urlopen(key_req, timeout=15) as resp:
-                    key_hex = resp.read().hex()
-                    key = key_hex[:32] if len(key_hex) >= 32 else key_hex
+                    key_bytes = resp.read()
+                    key = key_bytes.hex()[:32]
         except Exception:
             pass
 
@@ -183,96 +163,209 @@ def fetch_jable_m3u8_key(m3u8_url: str) -> tuple[str, str]:
     return key, iv
 
 
-def resolve_video_info(video_url: str) -> dict:
+def _extract_aes_key(html: str, m3u8_url: str, source: dict = None) -> tuple:
+    """提取 AES 密钥，优先用页面正则，fallback 到 manifest"""
+    cfg = source or {}
+    key, iv = "", ""
+
+    key_pattern = cfg.get("key_selector", "")
+    iv_pattern = cfg.get("iv_selector", "")
+
+    if key_pattern:
+        m = re.search(key_pattern, html)
+        if m:
+            key = m.group(1)
+    if iv_pattern:
+        m = re.search(iv_pattern, html)
+        if m:
+            raw = m.group(1)
+            iv = raw if raw.startswith("0x") else "0x" + raw
+
+    # fallback: 从 m3u8 manifest 获取
+    if not key and m3u8_url:
+        key, iv = _extract_aes_from_manifest(m3u8_url, referer=cfg.get("referer", ""))
+
+    return key, iv
+
+
+def resolve_video_info(video_url: str, source_config: dict = None, title: str = "") -> dict:
     """
-    从视频页面 URL 获取完整的下载信息（m3u8_url + AES 密钥）。
-    统一的入口函数，供定时轮询、手动添加、下载前刷新三个场景复用。
-    
-    返回: {id, name, m3u8_url, key, iv, headers} 或 {} （失败时）
+    通用入口：从视频页面 URL 获取完整的下载信息。
+
+    source_config: 订阅源配置 dict，包含解析规则。
+                   如果没有传，则使用通用规则（仅提取 m3u8）。
+    title: 可选，外部提供的标题（如 RSS item 标题），优先使用。
+
+    返回: {id, name, m3u8_url, key, iv, headers} 或 {}
     """
-    info = extract_jable_info(video_url)
-    if not info or not info.get("m3u8_url"):
+    cfg = source_config or {}
+    referer = cfg.get("referer", "")
+    custom_headers = cfg.get("headers", "")
+
+    html = _fetch_url(video_url, referer=referer, custom_headers=custom_headers)
+    if not html:
         return {}
-    # 如果页面未直接提供 AES 密钥，从 m3u8 manifest 获取
-    if not info.get("key"):
-        key, iv = fetch_jable_m3u8_key(info["m3u8_url"])
-        info["key"] = key
-        info["iv"] = iv
-    return info
+
+    # 标题：优先使用外部传入的（如 RSS 标题），否则从页面提取
+    if title:
+        name = _clean_title(title)
+    else:
+        title_pattern = cfg.get("title_selector", r'<title>([^<]+)</title>')
+        raw_title = _extract_text(html, title_pattern)
+        name = _clean_title(raw_title)
+
+    # 提取 video_id
+    video_id = _extract_video_id(video_url, cfg.get("video_id_pattern", ""))
+
+    # 提取 m3u8
+    m3u8_url = _extract_m3u8(html, cfg.get("m3u8_selector", ""))
+    if not m3u8_url:
+        print(f"[resolve_video_info] no m3u8 found in {video_url}, html_len={len(html)}")
+        return {}
+
+    # 提取 AES 密钥
+    key, iv = _extract_aes_key(html, m3u8_url, source=cfg)
+
+    # 构建 headers 字符串
+    headers_str = ""
+    if referer:
+        headers_str = f"Referer: {referer}"
+
+    return {
+        "id": video_id,
+        "name": name or video_id,
+        "m3u8_url": m3u8_url,
+        "key": key,
+        "iv": iv,
+        "headers": headers_str,
+    }
 
 
-def poll_jable_source(source: dict) -> list[dict]:
+def poll_webpage_source(source: dict) -> list:
     """
-    轮询单个 Jable 订阅源（从页面抓取视频列表）
-    source: {id, name, url, feed_type}
+    轮询单个网页订阅源（通过 source 中的规则解析）
+    source: {id, name, url, feed_type, page_url_pattern, referer, ...}
     返回: 新增任务列表
     """
-    name = source["name"]
     url = source["url"]
+    referer = source.get("referer", "")
+    page_url_pattern = source.get("page_url_pattern", "")
 
-    try:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-        })
-        opener = _get_proxy_opener()
-        if opener:
-            with opener.open(req, timeout=35) as resp:
-                content = resp.read().decode('utf-8', errors='replace')
-        else:
-            with urllib.request.urlopen(req, timeout=35) as resp:
-                content = resp.read().decode('utf-8', errors='replace')
-    except Exception:
+    content = _fetch_url(url, referer=referer, timeout=35)
+    if not content:
         return []
 
     # 从页面提取视频链接列表
-    video_urls = re.findall(r'href="(https://jable\.tv/videos/[^"]+)"', content)
-    # 去重
+    if page_url_pattern:
+        video_urls = re.findall(page_url_pattern, content)
+    else:
+        # 通用 fallback: 提取所有含视频特征的链接
+        video_urls = re.findall(r'href="(https?://[^"]+)"', content)
     video_urls = list(dict.fromkeys(video_urls))
 
     new_tasks = []
     for video_url in video_urls:
-        info = resolve_video_info(video_url)
+        info = resolve_video_info(video_url, source_config=source)
         if not info:
             continue
 
-        # 检查是否已存在（已完成/下载中/等待中 → 跳过）
         vid = info["id"]
         existing = get_task(vid)
         if existing and existing["status"] not in ("failed", "stopped"):
             continue  # 跳过已存在的非失败任务
 
-        # 写入数据库（去重，已存在则更新 key/iv）
         task = create_task(vid, info["name"], info["m3u8_url"],
-                          info["headers"], info["key"], info["iv"])
-        if task["status"] in ("waiting",):  # 新建或重新等待的任务才算新增
+                          info["headers"], info["key"], info["iv"],
+                          source_id=source.get("id"))
+        if task["status"] in ("waiting",):
             new_tasks.append(task)
 
     return new_tasks
 
-def poll_all_sources() -> list[dict]:
-    """轮询所有启用的订阅源"""
+
+def poll_rss_source(source: dict) -> list:
+    """轮询标准 RSS 订阅源"""
+    url = source["url"]
+
+    content = _fetch_url(url, timeout=35)
+    if not content:
+        return []
+
+    new_tasks = []
+    try:
+        root = ET.fromstring(content)
+        for item in root.iter("item"):
+            link = ""
+            enclosure = item.find("enclosure")
+            if enclosure is not None:
+                link = enclosure.get("url", "")
+            if not link:
+                link_el = item.find("link")
+                if link_el is not None:
+                    link = link_el.text or ""
+            if not link:
+                continue
+
+            # 从 RSS item 提取标题（通常比页面 <title> 更干净）
+            rss_title = ""
+            title_el = item.find("title")
+            if title_el is not None:
+                rss_title = (title_el.text or "").strip()
+
+            info = resolve_video_info(link, source_config=source, title=rss_title)
+            if not info:
+                continue
+
+            vid = info["id"]
+            existing = get_task(vid)
+            if existing and existing["status"] not in ("failed", "stopped"):
+                continue
+
+            task = create_task(vid, info["name"], info["m3u8_url"],
+                              info["headers"], info["key"], info["iv"],
+                              source_id=source.get("id"))
+            if task["status"] in ("waiting",):
+                new_tasks.append(task)
+    except ET.ParseError as e:
+        print(f"[poll_rss_source] XML parse error for {url}: {e}")
+
+    return new_tasks
+
+
+def poll_all_sources() -> list:
+    """轮询所有启用的订阅源，根据 feed_type 分发"""
     from app.db.database import list_sources
     sources = list_sources(enabled_only=True)
     all_new = []
     for src in sources:
         try:
-            new_tasks = poll_jable_source(src)
+            feed_type = src.get("feed_type", "webpage")
+            if feed_type == "rss":
+                new_tasks = poll_rss_source(src)
+            elif feed_type == "m3u8_direct":
+                # 直接 m3u8 不需要轮询
+                continue
+            else:
+                new_tasks = poll_webpage_source(src)
             all_new.extend(new_tasks)
         except Exception as e:
             print(f"[rss_poller] Error polling {src['name']}: {e}")
     return all_new
+
 
 def already_downloaded(video_id: str) -> bool:
     """检查是否已完成或下载中"""
     task = get_task(video_id)
     return task is not None
 
-def fetch_all_video_details(video_urls: list) -> list[dict]:
+
+def fetch_all_video_details(video_urls: list, source_config: dict = None) -> list:
     """并发提取所有视频详情"""
     from concurrent.futures import ThreadPoolExecutor
     results = []
+
     def fetch_one(video_url):
-        info = resolve_video_info(video_url)
+        info = resolve_video_info(video_url, source_config=source_config)
         return info if info else None
 
     with ThreadPoolExecutor(max_workers=4) as executor:

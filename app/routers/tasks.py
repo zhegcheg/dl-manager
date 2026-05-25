@@ -95,9 +95,17 @@ def create_task_from_url(body: dict):
     if not video_url:
         raise HTTPException(400, "url or video_url required")
     download_dir = body.get("download_dir", "")
+
+    # 支持传入解析规则（可选），用于通用网页解析
+    source_config = {}
+    for key in ["referer", "headers", "title_selector", "m3u8_selector",
+                "video_id_pattern", "key_selector", "iv_selector"]:
+        if body.get(key):
+            source_config[key] = body[key]
+
     import traceback
     try:
-        info = resolve_video_info(video_url)
+        info = resolve_video_info(video_url, source_config=source_config if source_config else None)
     except Exception as e:
         print(f"[from-url] resolve_video_info failed: {e}\n{traceback.format_exc()}")
         raise HTTPException(502, f"页面解析失败: {e}")

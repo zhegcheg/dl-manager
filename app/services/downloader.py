@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 import yt_dlp
-from app.db.database import update_task, get_task, get_download_config, get_proxy_config
+from app.db.database import update_task, get_task, get_download_config, get_proxy_config, get_source_download_dir, get_task_temp_dir
 from app.services.queue import register_download, unregister_download
 
 
@@ -17,17 +17,28 @@ POLL_INTERVAL = 1  # DB 更新频率（秒），避免写入太频繁
 
 def refresh_m3u8_url(task_id: str) -> str:
     """
-    下载前刷新 m3u8 URL，避免 CDN Token 过期。
-    定时任务抓取的 m3u8 URL 含临时 Token，过一段时间就失效。
-    在实际下载前重新访问页面获取最新 URL。
+    下载前刷新 m3u8 URL。
+    通过任务关联的订阅源配置构建刷新 URL，不再硬编码站点。
     """
     try:
         from app.services.rss_poller import resolve_video_info
+        from app.db.database import get_source
         task = get_task(task_id)
         if not task:
             return ""
-        video_url = f"https://jable.tv/videos/{task_id}/"
-        info = resolve_video_info(video_url)
+
+        # 从任务关联的订阅源获取配置
+        source_id = task.get("source_id")
+        source_config = get_source(source_id) if source_id else None
+
+        # 构建刷新 URL：优先使用订阅源配置的模板
+        refresh_pattern = (source_config or {}).get("refresh_url_pattern", "")
+        if not refresh_pattern:
+            print(f"[refresh_m3u8_url] {task_id}: 未配置 refresh_url_pattern，跳过刷新")
+            return ""
+
+        video_url = refresh_pattern.replace("{task_id}", task_id)
+        info = resolve_video_info(video_url, source_config=source_config)
         if info and info.get("m3u8_url"):
             # 同步更新 AES 密钥
             if info.get("key"):
@@ -139,20 +150,32 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
     返回:
         DownloadThread 对象（提供 poll/terminate/wait 接口）
     """
-    cfg = get_download_config()
-    download_dir = cfg.get("download_dir", str(Path.home() / ".jable-dl-server" / "tasks"))
-    temp_dir = cfg.get("temp_dir", str(Path.home() / ".jable-dl-server" / "temp"))
-    thread_count = int(cfg.get("thread_count", "8"))
-    
-    # 检查任务是否有自定义 download_dir
+    # 获取任务记录，优先使用任务中已计算好的路径（含订阅源子目录）
     task = get_task(task_id)
-    if task and task.get("download_dir"):
-        download_dir = task["download_dir"]
-    
+    if not task:
+        update_task(task_id, status="failed", stage="failed", error="任务记录不存在")
+        return None
+
+    # download_dir：任务记录 > 按订阅源计算 > 全局配置
+    download_dir = task.get("download_dir", "")
+    if not download_dir:
+        source_id = task.get("source_id")
+        download_dir = get_source_download_dir(source_id)
+
+    # temp_dir：任务记录 > 全局计算
+    temp_dir = task.get("temp_dir", "")
+    if not temp_dir:
+        temp_dir = get_task_temp_dir()
+
     # 确保目录存在
     Path(download_dir).mkdir(parents=True, exist_ok=True)
     Path(temp_dir).mkdir(parents=True, exist_ok=True)
 
+    # 将路径信息写回数据库（确保恢复机制可用）
+    update_task(task_id, download_dir=download_dir, temp_dir=temp_dir)
+
+    cfg = get_download_config()
+    thread_count = int(cfg.get("thread_count", "8"))
     # 下载前刷新 m3u8 URL（CDN Token 有时效性，定时任务抓取的 URL 可能已过期）
     fresh_url = refresh_m3u8_url(task_id)
     if fresh_url:
@@ -229,8 +252,21 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
                     mp4_path = Path(filename).with_suffix('.mp4')
                     
                     if mp4_path.exists() and mp4_path.stat().st_size > 0:
-                        # 从 temp_dir 移动到 download_dir
-                        final_mp4 = Path(download_dir) / mp4_path.name
+                        # 从 temp_dir 移动到 download_dir（订阅源子目录）
+                        # 文件名长度保护（Windows MAX_PATH 260 字符限制）
+                        mp4_name = mp4_path.name
+                        if len(mp4_name) > 200:
+                            stem = mp4_path.stem[:180]
+                            mp4_name = stem + mp4_path.suffix
+                        final_mp4 = Path(download_dir) / mp4_name
+                        # 防止文件名冲突
+                        if final_mp4.exists():
+                            stem = final_mp4.stem
+                            suffix = final_mp4.suffix
+                            counter = 1
+                            while final_mp4.exists():
+                                final_mp4 = Path(download_dir) / f"{stem}_{counter}{suffix}"
+                                counter += 1
                         try:
                             shutil.move(str(mp4_path), str(final_mp4))
                         except Exception as move_err:

@@ -1,13 +1,14 @@
 """
 SQLite 任务状态管理
 """
+import re
 import sqlite3
 import time
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
-DB_PATH = Path.home() / ".jable-dl-server" / "state.db"
+DB_PATH = Path.home() / ".dl-manager" / "state.db"
 
 def get_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -60,17 +61,54 @@ def init():
         conn.execute("ALTER TABLE tasks ADD COLUMN download_dir TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass  # 字段已存在
+    try:
+        conn.execute("ALTER TABLE tasks ADD COLUMN source_id INTEGER DEFAULT NULL")
+    except sqlite3.OperationalError:
+        pass  # 字段已存在
+    try:
+        conn.execute("ALTER TABLE tasks ADD COLUMN source_name TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # 字段已存在
+    try:
+        conn.execute("ALTER TABLE tasks ADD COLUMN temp_dir TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # 字段已存在
     conn.execute("""
         CREATE TABLE IF NOT EXISTS subscription_sources (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             url TEXT NOT NULL,
-            feed_type TEXT DEFAULT 'jable',
+            feed_type TEXT DEFAULT 'webpage',
             enabled INTEGER DEFAULT 1,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            page_url_pattern TEXT DEFAULT '',
+            title_selector TEXT DEFAULT '',
+            m3u8_selector TEXT DEFAULT '',
+            video_id_pattern TEXT DEFAULT '',
+            referer TEXT DEFAULT '',
+            headers TEXT DEFAULT '',
+            key_selector TEXT DEFAULT '',
+            iv_selector TEXT DEFAULT '',
+            refresh_url_pattern TEXT DEFAULT '',
+            poll_cron TEXT DEFAULT '0 4 * * *'
         )
     """)
+    # 迁移：为旧数据库添加订阅源扩展字段
+    _source_extra_cols = [
+        "page_url_pattern", "title_selector", "m3u8_selector", "video_id_pattern",
+        "referer", "headers", "key_selector", "iv_selector", "refresh_url_pattern",
+    ]
+    for col in _source_extra_cols:
+        try:
+            conn.execute(f"ALTER TABLE subscription_sources ADD COLUMN {col} TEXT DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+    # 迁移：poll_cron 字段
+    try:
+        conn.execute("ALTER TABLE subscription_sources ADD COLUMN poll_cron TEXT DEFAULT '0 4 * * *'")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("""
         CREATE TABLE IF NOT EXISTS scheduler_config (
             key TEXT PRIMARY KEY,
@@ -105,7 +143,7 @@ def init():
     # 默认下载配置
     conn.execute(
         "INSERT OR IGNORE INTO download_config (key, value, updated_at) VALUES (?, ?, ?)",
-        ("download_dir", str(Path.home() / ".jable-dl-server" / "tasks"), now)
+        ("download_dir", str(Path.home() / ".dl-manager" / "tasks"), now)
     )
     conn.execute(
         "INSERT OR IGNORE INTO download_config (key, value, updated_at) VALUES (?, ?, ?)",
@@ -117,7 +155,7 @@ def init():
     )
     conn.execute(
         "INSERT OR IGNORE INTO download_config (key, value, updated_at) VALUES (?, ?, ?)",
-        ("temp_dir", str(Path.home() / ".jable-dl-server" / "temp"), now)
+        ("temp_dir", str(Path.home() / ".dl-manager" / "temp"), now)
     )
     conn.execute(
         "INSERT OR IGNORE INTO download_config (key, value, updated_at) VALUES (?, ?, ?)",
@@ -143,14 +181,65 @@ def init():
     conn.commit()
     conn.close()
 
-def create_task(task_id: str, name: str, m3u8_url: str, headers: str = "", key: str = "", iv: str = "", priority: int = 0, download_dir: str = "") -> dict:
+def sanitize_dirname(name: str, max_len: int = 80) -> str:
+    """将订阅源名称转为安全的目录名
+    规则：替换非法路径字符，截断长度，空白名回退为 'unnamed'
+    """
+    safe = re.sub(r'[\\/:*?"<>|]', '_', name).strip('. ')
+    if not safe:
+        return 'unnamed'
+    return safe[:max_len]
+
+
+def get_source_download_dir(source_id: int = None) -> str:
+    """获取指定订阅源的下载目录路径
+    若有 source_id 且源存在，返回 {download_dir}/{sanitized_source_name}
+    否则返回 {download_dir}/_no_source
+    """
+    cfg = get_download_config()
+    base = cfg.get("download_dir", str(Path.home() / ".dl-manager" / "tasks"))
+    if source_id:
+        source = get_source(source_id)
+        if source:
+            dirname = sanitize_dirname(source["name"])
+            return str(Path(base) / dirname)
+    return str(Path(base) / "_no_source")
+
+
+def get_task_temp_dir() -> str:
+    """获取全局临时目录路径（位于下载根目录下的 _temp 子目录）
+    若 download_config 中显式配置了 temp_dir 则优先使用（兼容旧配置）
+    """
+    cfg = get_download_config()
+    temp_dir = cfg.get("temp_dir", "")
+    # 若用户显式配置了非默认 temp_dir，尊重用户配置
+    default_temp = str(Path.home() / ".dl-manager" / "temp")
+    if temp_dir and temp_dir != default_temp:
+        return temp_dir
+    # 否则使用 {download_dir}/_temp
+    base = cfg.get("download_dir", str(Path.home() / ".dl-manager" / "tasks"))
+    return str(Path(base) / "_temp")
+
+
+def create_task(task_id: str, name: str, m3u8_url: str, headers: str = "", key: str = "", iv: str = "", priority: int = 0, download_dir: str = "", source_id: int = None) -> dict:
     now = datetime.utcnow().isoformat() + "Z"
+    # 自动计算下载目录：优先使用传入的 download_dir，否则按订阅源计算
+    if not download_dir:
+        download_dir = get_source_download_dir(source_id)
+    # 获取源名称（冗余存储，防止源被删后丢失路径信息）
+    source_name = ""
+    if source_id:
+        source = get_source(source_id)
+        if source:
+            source_name = source["name"]
+    # 计算临时目录
+    temp_dir = get_task_temp_dir()
     conn = get_db()
     try:
         conn.execute("""
-            INSERT INTO tasks (id, name, m3u8_url, headers, key, iv, status, stage, priority, download_dir, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'waiting', 'waiting', ?, ?, ?, ?)
-        """, (task_id, name, m3u8_url, headers, key, iv, priority, download_dir, now, now))
+            INSERT INTO tasks (id, name, m3u8_url, headers, key, iv, status, stage, priority, download_dir, source_id, source_name, temp_dir, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'waiting', 'waiting', ?, ?, ?, ?, ?, ?, ?)
+        """, (task_id, name, m3u8_url, headers, key, iv, priority, download_dir, source_id, source_name, temp_dir, now, now))
         conn.commit()
     except sqlite3.IntegrityError:
         if key or iv:
@@ -175,6 +264,7 @@ _ORDER_BY_WHITELIST = {
     "chunks", "move_speed", "move_elapsed", "error",
     "retry_count", "created_at", "updated_at", "completed_at",
     "file", "final_path", "priority", "retry_after", "download_dir",
+    "source_id", "source_name", "temp_dir",
 }
 
 
@@ -291,28 +381,43 @@ def reset_task_for_manual_retry(task_id: str):
     return error_msg
 
 def get_task_log_path(task_id: str) -> Path:
-    log_dir = Path.home() / ".jable-dl-server" / "logs"
+    log_dir = Path.home() / ".dl-manager" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir / f"{task_id}.log"
 
 def get_task_dir(task_id: str) -> Path:
-    cfg = get_download_config()
-    base_dir = cfg.get("download_dir", str(Path.home() / ".jable-dl-server" / "tasks"))
-    # 检查任务是否有自定义 download_dir
+    """获取任务的工作目录（用于 legacy TS 分片场景）
+    优先使用任务记录中的 download_dir，fallback 到全局配置
+    """
     task = get_task(task_id)
     if task and task.get("download_dir"):
         base_dir = task["download_dir"]
+    else:
+        cfg = get_download_config()
+        base_dir = cfg.get("download_dir", str(Path.home() / ".dl-manager" / "tasks"))
     task_dir = Path(base_dir) / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
     return task_dir
 
 # ── 订阅源 ──
-def add_source(name: str, url: str, feed_type: str = "jable") -> dict:
+_SOURCE_EXTRA_COLS = [
+    "page_url_pattern", "title_selector", "m3u8_selector", "video_id_pattern",
+    "referer", "headers", "key_selector", "iv_selector", "refresh_url_pattern",
+    "poll_cron",
+]
+
+def add_source(name: str, url: str, feed_type: str = "webpage", **extra) -> dict:
     now = datetime.utcnow().isoformat() + "Z"
     conn = get_db()
+    cols = "name, url, feed_type, enabled, created_at, updated_at"
+    vals = [name, url, feed_type, 1, now, now]
+    for k in _SOURCE_EXTRA_COLS:
+        if k in extra:
+            cols += f", {k}"
+            vals.append(extra[k])
+    placeholders = ", ".join(["?"] * len(vals))
     cur = conn.execute(
-        "INSERT INTO subscription_sources (name, url, feed_type, enabled, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)",
-        (name, url, feed_type, now, now)
+        f"INSERT INTO subscription_sources ({cols}) VALUES ({placeholders})", vals
     )
     conn.commit()
     row = conn.execute("SELECT * FROM subscription_sources WHERE id = ?", (cur.lastrowid,)).fetchone()
@@ -371,8 +476,8 @@ def set_scheduler_config(key: str, value: str):
 def get_download_config() -> dict:
     """获取下载配置（下载目录、最大并发数、线程数、NAS转移开关）"""
     defaults = {
-        "download_dir": str(Path.home() / ".jable-dl-server" / "tasks"),
-        "temp_dir": str(Path.home() / ".jable-dl-server" / "temp"),
+        "download_dir": str(Path.home() / ".dl-manager" / "tasks"),
+        "temp_dir": str(Path.home() / ".dl-manager" / "temp"),
         "max_concurrent": "2",
         "thread_count": "8",
         "move_to_nas": "true",

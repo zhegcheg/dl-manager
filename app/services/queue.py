@@ -103,6 +103,9 @@ def try_start_next() -> int:
                 task["key"],
                 task["iv"]
             )
+            if proc is None:
+                # start_download 内部已标记失败，跳过
+                continue
             register_download(task["id"], proc)
             started += 1
             with _lock:
@@ -246,15 +249,21 @@ def _recover_tasks(recover_list: list):
 
 
 def _recover_merge(tid: str, t: dict):
-    """恢复合并任务"""
+    """恢复合并任务
+    路径解析优先级：task["download_dir"] > 全局配置
+    """
     import shutil
     from pathlib import Path
     from app.db.database import update_task, get_download_config
     from app.services.merger import merge_ts_to_mp4
     from app.services.mover import move_to_media_library
     
-    cfg = get_download_config()
-    download_dir = cfg.get("download_dir", "")
+    # 优先使用任务记录中的 download_dir（含订阅源子目录），fallback 到全局配置
+    download_dir = t.get("download_dir", "")
+    if not download_dir:
+        cfg = get_download_config()
+        download_dir = cfg.get("download_dir", "")
+    
     task_dir = Path(download_dir) / tid
     
     # 搜索分片目录
@@ -304,34 +313,77 @@ def _recover_merge(tid: str, t: dict):
 
 
 def _recover_move(tid: str, t: dict):
-    """恢复转移任务"""
+    """恢复转移任务
+    路径解析优先级：task["file"] > task["download_dir"]/tid.mp4 > task["temp_dir"]/tid.mp4 > 全局配置
+    """
     import shutil
     from pathlib import Path
     from app.db.database import update_task, get_download_config
     from app.services.mover import move_to_media_library
     
-    cfg = get_download_config()
-    download_dir = cfg.get("download_dir", "")
-    temp_dir = cfg.get("temp_dir", "")
-    mp4_path = Path(download_dir) / f"{tid}.mp4"
-    
-    # 如果 download_dir 中没有，检查 temp_dir（可能在移动前崩溃）
-    if not mp4_path.exists() and temp_dir:
-        temp_mp4 = Path(temp_dir) / f"{tid}.mp4"
-        if temp_mp4.exists():
-            # 先从 temp_dir 移到 download_dir
-            try:
-                shutil.move(str(temp_mp4), str(mp4_path))
-            except Exception:
-                shutil.copy2(str(temp_mp4), str(mp4_path))
-                temp_mp4.unlink()
-            print(f"[恢复] {tid}: 从 temp_dir 恢复到 download_dir")
-    
-    if mp4_path.exists():
+    mp4_path = None
+
+    # 1. 优先使用 task["file"]（下载完成时记录的完整路径）
+    task_file = t.get("file", "")
+    if task_file and Path(task_file).exists():
+        mp4_path = Path(task_file)
+
+    # 2. 尝试 task["download_dir"] / tid.mp4
+    if not mp4_path:
+        dl_dir = t.get("download_dir", "")
+        if dl_dir:
+            candidate = Path(dl_dir) / f"{tid}.mp4"
+            if candidate.exists():
+                mp4_path = candidate
+
+    # 3. 尝试 task["temp_dir"] / tid.mp4（可能在移动到 download_dir 前崩溃）
+    if not mp4_path:
+        temp_dir = t.get("temp_dir", "")
+        if temp_dir:
+            candidate = Path(temp_dir) / f"{tid}.mp4"
+            if candidate.exists():
+                # 先移到 download_dir
+                dl_dir = t.get("download_dir", "")
+                if not dl_dir:
+                    cfg = get_download_config()
+                    dl_dir = cfg.get("download_dir", "")
+                if dl_dir:
+                    dest = Path(dl_dir) / f"{tid}.mp4"
+                    Path(dl_dir).mkdir(parents=True, exist_ok=True)
+                    try:
+                        shutil.move(str(candidate), str(dest))
+                    except Exception:
+                        shutil.copy2(str(candidate), str(dest))
+                        candidate.unlink()
+                    mp4_path = dest
+                    print(f"[恢复] {tid}: 从 temp_dir 恢复到 download_dir")
+
+    # 4. 最后 fallback 到全局配置
+    if not mp4_path:
+        cfg = get_download_config()
+        download_dir = cfg.get("download_dir", "")
+        temp_dir_global = cfg.get("temp_dir", "")
+        candidate = Path(download_dir) / f"{tid}.mp4"
+        if candidate.exists():
+            mp4_path = candidate
+        elif temp_dir_global:
+            temp_mp4 = Path(temp_dir_global) / f"{tid}.mp4"
+            if temp_mp4.exists():
+                dest = Path(download_dir) / f"{tid}.mp4"
+                try:
+                    shutil.move(str(temp_mp4), str(dest))
+                except Exception:
+                    shutil.copy2(str(temp_mp4), str(dest))
+                    temp_mp4.unlink()
+                mp4_path = dest
+                print(f"[恢复] {tid}: 从全局 temp_dir 恢复到 download_dir")
+
+    if mp4_path and mp4_path.exists():
         name = t.get("name", tid) or tid
-        update_task(tid, stage="moving", progress=0, move_speed="", move_elapsed="")
+        update_task(tid, stage="moving", progress=0, move_speed="", move_elapsed="",
+                   file=str(mp4_path))
         move_to_media_library(tid, str(mp4_path), name + ".mp4")
         print(f"[恢复] {tid}: 重启转移")
     else:
         update_task(tid, status="failed", stage="failed", error="转移中断：源文件不存在")
-        print(f"[恢复] {tid}: 本地 mp4 不存在(download_dir/temp_dir)，标记失败")
+        print(f"[恢复] {tid}: 本地 mp4 不存在，标记失败")

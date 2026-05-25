@@ -2,6 +2,7 @@
 <html lang="zh">
 <head>
   <meta charset="UTF-8">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DL Manager</title>
   <link rel="stylesheet" href="style.css">
@@ -41,7 +42,7 @@
         <button class="btn sm" @click="batchRetry" :disabled="!canBatchRetry" style="border-color:#4ade80;color:#4ade80;">🔄 批量重试</button>
         <button class="btn sm danger" @click="batchDelete" :disabled="!selectedCount" style="border-color:#f87171;color:#f87171;">🗑 批量删除</button>
         <span style="flex:1"></span>
-        <button class="btn" @click="pollNow" :disabled="polling">🔄 [[ polling ? '轮询中...' : '刷新订阅' ]]</button>
+        <button class="btn" @click="showPollModal=true" :disabled="!sources.length"> [[ polling ? '轮询中...' : '刷新订阅' ]]</button>
         <button class="btn sm" @click="toggleViewMode" style="border-color:#888;color:#aaa;font-size:16px;" :title="viewMode==='grid' ? '切换列表' : '切换卡片'">[[ viewMode==='grid' ? '☰' : '▦' ]]</button>
       </div>
     </div>
@@ -165,12 +166,19 @@
     <div class="add-source-form">
       <div class="row">
         <input v-model="newSource.name" placeholder="订阅源名称">
-        <input v-model="newSource.url" placeholder="页面 URL，如：https://jable.tv/">
+        <input v-model="newSource.url" placeholder="列表页 URL，如：https://example.com/list">
         <select v-model="newSource.feed_type">
-          <option value="jable">Jable 页面</option>
+          <option value="webpage">网页解析</option>
           <option value="rss">标准 RSS</option>
         </select>
+      </div>
+      <div class="row" style="margin-top:6px;">
+        <input v-model="newSource.poll_cron" placeholder="定时轮询 cron，默认 0 4 * * *（每天4点）" style="flex:2;">
+        <input v-model="newSource.page_url_pattern" placeholder="视频链接正则，如：href=&quot;(https://example.com/videos/[^&quot;]+)&quot;" style="flex:3;">
         <button class="btn primary" @click="addSource">添加</button>
+      </div>
+      <div style="color:#666;font-size:12px;margin-top:4px;">
+        💡 必填：名称、列表页 URL、视频链接正则。其余字段（标题/m3u8/AES提取规则）可在编辑中设置，不填则使用通用规则自动识别。
       </div>
     </div>
 
@@ -183,9 +191,11 @@
         <div class="info">
           <div class="name">[[ s.name ]] <span class="feed-type">[[ s.feed_type ]]</span></div>
           <div class="url">[[ s.url ]]</div>
+          <div style="color:#888;font-size:12px;margin-top:2px;">⏰ [[ s.poll_cron || '0 4 * * *' ]]</div>
         </div>
         <div class="actions">
           <button class="toggle" :class="{on: s.enabled}" @click="toggleSource(s)"></button>
+          <button class="btn sm" @click="pollSource(s)">🔄 轮询</button>
           <button class="btn sm" @click="editSource(s)">✏️ 编辑</button>
           <button class="btn danger sm" @click="delSource(s.id)">🗑 删除</button>
         </div>
@@ -230,24 +240,6 @@
       <div class="item" style="margin-top:8px;">
         <button class="btn primary" @click="saveDownloadConfig" :disabled="configSaving">💾 [[ configSaving ? '保存中...' : '保存设置' ]]</button>
         <span style="color:#4ade80;font-size:13px;margin-left:12px;font-weight:500;" v-if="configSaved">✅ [[ configSaved ]]</span>
-      </div>
-    </div>
-
-    <!-- 定时调度配置 -->
-    <div class="scheduler-config">
-      <div class="item">
-        <label>每日执行时间</label>
-        <div>
-          <input v-model="schedulerConfig.rss_cron" placeholder="0 4 * * *" style="width:160px;">
-          <div class="cron-hint">格式: 分 时 日 月 周（如 0 4 * * * = 每天凌晨4点）</div>
-        </div>
-      </div>
-      <div class="item">
-        <label>启用定时轮询</label>
-        <button class="toggle" :class="{on: schedulerConfig.rss_enabled==='true'}" @click="toggleScheduler"></button>
-      </div>
-      <div class="item" style="margin-top:8px;">
-        <button class="btn" @click="saveSchedulerConfig">💾 保存调度</button>
       </div>
     </div>
 
@@ -300,19 +292,71 @@
 
   <!-- 编辑订阅源弹窗 -->
   <div class="overlay" v-if="editingSource" @click.self="editingSource=null">
-    <div class="panel">
+    <div class="panel" style="max-width:640px;">
       <div class="panel-header">
         <h2>编辑订阅源</h2>
         <button class="panel-close" @click="editingSource=null">×</button>
       </div>
-      <div class="panel-body">
+      <div class="panel-body" style="max-height:70vh;overflow-y:auto;">
         <div class="form-row">
           <label>名称</label>
           <input v-model="editingSource.name" placeholder="订阅源名称">
         </div>
         <div class="form-row">
-          <label>URL</label>
-          <input v-model="editingSource.url" placeholder="页面 URL">
+          <label>列表页 URL</label>
+          <input v-model="editingSource.url" placeholder="列表页 URL">
+        </div>
+        <div class="form-row">
+          <label>类型</label>
+          <select v-model="editingSource.feed_type">
+            <option value="webpage">网页解析</option>
+            <option value="rss">标准 RSS</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>定时轮询 (cron)</label>
+          <input v-model="editingSource.poll_cron" placeholder="0 4 * * *">
+          <div style="color:#888;font-size:12px;">格式：分 时 日 月 周。如 <code>0 4 * * *</code> = 每天4点，<code>0 */6 * * *</code> = 每6小时</div>
+        </div>
+        <hr style="border-color:#333;margin:12px 0;">
+        <div style="color:#ff6b9d;font-size:13px;margin-bottom:8px;">🔧 解析规则（不填则使用通用规则自动识别）</div>
+        <div class="form-row">
+          <label>视频链接正则</label>
+          <input v-model="editingSource.page_url_pattern" placeholder='从列表页提取视频链接，如：href="(https://example.com/videos/[^"]+)"'>
+          <div style="color:#888;font-size:12px;">必须包含一个捕获组 (...)，匹配视频页 URL</div>
+        </div>
+        <div class="form-row">
+          <label>标题正则</label>
+          <input v-model="editingSource.title_selector" placeholder="从视频页提取标题，默认 &lt;title&gt; 标签">
+        </div>
+        <div class="form-row">
+          <label>m3u8 正则</label>
+          <input v-model="editingSource.m3u8_selector" placeholder="从页面提取 m3u8 URL 的正则，不填则自动查找">
+        </div>
+        <div class="form-row">
+          <label>视频 ID 正则</label>
+          <input v-model="editingSource.video_id_pattern" placeholder="从视频 URL 提取 ID，不填则取 URL 最后一段">
+        </div>
+        <div class="form-row">
+          <label>Referer</label>
+          <input v-model="editingSource.referer" placeholder="请求头 Referer，如：https://example.com/">
+        </div>
+        <div class="form-row">
+          <label>自定义 Headers</label>
+          <textarea v-model="editingSource.headers" rows="2" placeholder="每行一个，如：&#10;Cookie: xxx=yyy&#10;X-Token: abc"></textarea>
+        </div>
+        <div class="form-row">
+          <label>AES Key 正则</label>
+          <input v-model="editingSource.key_selector" placeholder="从页面提取 AES 密钥的正则">
+        </div>
+        <div class="form-row">
+          <label>AES IV 正则</label>
+          <input v-model="editingSource.iv_selector" placeholder="从页面提取 AES IV 的正则">
+        </div>
+        <div class="form-row">
+          <label>刷新 URL 模板</label>
+          <input v-model="editingSource.refresh_url_pattern" placeholder="下载前刷新 m3u8 的 URL，用 {task_id} 作占位符">
+          <div style="color:#888;font-size:12px;">如：<code>https://example.com/videos/{task_id}/</code></div>
         </div>
       </div>
       <div class="panel-footer">
@@ -329,17 +373,17 @@
       <!-- 模式切换 -->
       <div class="form-group" style="display:flex;gap:12px;margin-bottom:8px;">
         <label style="cursor:pointer;display:flex;align-items:center;gap:4px;">
-          <input type="radio" v-model="addMode" value="jable"> Jable 页面
+          <input type="radio" v-model="addMode" value="url"> 网页解析
         </label>
         <label style="cursor:pointer;display:flex;align-items:center;gap:4px;">
           <input type="radio" v-model="addMode" value="m3u8"> 直接 m3u8
         </label>
       </div>
-      <!-- Jable 模式 -->
-      <div v-if="addMode==='jable'" class="form-group">
+      <!-- 网页解析模式 -->
+      <div v-if="addMode==='url'" class="form-group">
         <label>视频页面 URL</label>
-        <input type="text" v-model="addUrl" placeholder="https://jable.tv/videos/xxxx/" @keyup.enter="doAddVideo">
-        <div class="hint">输入 Jable 视频页面地址，自动抓取标题和 m3u8</div>
+        <input type="text" v-model="addUrl" placeholder="https://example.com/videos/xxxx/" @keyup.enter="doAddVideo">
+        <div class="hint">输入视频页面地址，自动抓取标题和 m3u8</div>
       </div>
       <!-- m3u8 直输模式 -->
       <div v-if="addMode==='m3u8'">
@@ -366,6 +410,26 @@
         <button class="btn sm" :disabled="!canAddVideo || adding" @click="doAddVideo" style="border-color:#ff6b9d;color:#ff6b9d;">[[ adding ? '添加中...' : '添加' ]]</button>
       </div>
       <div v-if="addMsg" class="form-group" :class="addMsg.indexOf('失败')>=0?'error':'success'">[[ addMsg ]]</div>
+    </div>
+  </div>
+
+  <!-- 刷新订阅弹窗 -->
+  <div v-if="showPollModal" class="modal-mask" @click.self="showPollModal=false">
+    <div class="modal" style="max-width:480px;">
+      <div class="modal-title">选择要刷新的订阅源</div>
+      <div style="max-height:360px;overflow-y:auto;margin:16px 0;">
+        <div v-for="s in sources" :key="s.id" @click="pollSourceById(s.id)" class="source-item" style="padding:10px 12px;border:1px solid #333;border-radius:8px;margin-bottom:8px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;transition:border-color 0.2s;" @mouseenter="$event.currentTarget.style.borderColor='#ff6b9d'" @mouseleave="$event.currentTarget.style.borderColor='#333'">
+          <div>
+            <div style="font-size:14px;color:#fff;">[[ s.name ]]</div>
+            <div style="font-size:11px;color:#888;margin-top:2px;">[[ s.url ]]</div>
+          </div>
+          <div style="font-size:11px;color:#ff6b9d;">🔄 刷新</div>
+        </div>
+        <div v-if="!sources.length" style="color:#888;text-align:center;padding:24px;">暂无订阅源</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn sm" @click="showPollModal=false">取消</button>
+      </div>
     </div>
   </div>
 

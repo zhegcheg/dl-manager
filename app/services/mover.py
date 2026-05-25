@@ -1,16 +1,42 @@
 """
-文件转移逻辑（异步）- dd 方案
+文件转移逻辑（异步）- 跨平台方案
 """
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
 from pathlib import Path
-from app.db.database import update_task
+from app.db.database import update_task, get_task
 from app.db.database import get_download_config
 
 MEDIA_DIR = Path(os.getenv("NAS_MEDIA_DIR", "/mnt/fn-nas-imovie"))
+
+def _cleanup_source_file(task_id: str):
+    """转移完成后清理源文件和空的订阅源子目录"""
+    t = get_task(task_id)
+    if not t:
+        return
+    # 删除已转移的源文件
+    src_file = t.get("file", "")
+    if src_file and Path(src_file).exists():
+        try:
+            Path(src_file).unlink()
+        except Exception:
+            pass
+    # 如果订阅源子目录为空，一并清理
+    dl_dir = t.get("download_dir", "")
+    if dl_dir:
+        dl_path = Path(dl_dir)
+        if dl_path.exists():
+            try:
+                # 仅当目录为空时才删除（避免误删其他文件）
+                if not any(dl_path.iterdir()):
+                    dl_path.rmdir()
+            except Exception:
+                pass
+
 
 def _do_copy(task_id: str, src: Path, dest: Path):
     """后台复制线程 - 跨平台方案"""
@@ -67,12 +93,7 @@ def _copy_with_progress(task_id: str, src: Path, dest: Path, total_size: int, st
     update_task(task_id, status="completed", stage="completed",
                progress=100, move_speed="done", final_path=str(dest))
     src.unlink()
-    cfg = get_download_config()
-    download_dir = cfg.get("download_dir", str(Path.home() / ".jable-dl-server" / "tasks"))
-    task_dir = Path(download_dir) / task_id
-    if task_dir.exists():
-        import shutil
-        shutil.rmtree(task_dir, ignore_errors=True)
+    _cleanup_source_file(task_id)
 
 
 def _copy_with_dd(task_id: str, src: Path, dest: Path, total_size: int, start: float):
@@ -113,12 +134,7 @@ def _copy_with_dd(task_id: str, src: Path, dest: Path, total_size: int, start: f
     update_task(task_id, status="completed", stage="completed",
                progress=100, move_speed="done", final_path=str(dest))
     src.unlink()
-    cfg = get_download_config()
-    download_dir = cfg.get("download_dir", str(Path.home() / ".jable-dl-server" / "tasks"))
-    task_dir = Path(download_dir) / task_id
-    if task_dir.exists():
-        import shutil
-        shutil.rmtree(task_dir, ignore_errors=True)
+    _cleanup_source_file(task_id)
 
 
 def move_to_media_library(task_id: str, file_path: str, final_name: str = None, on_done=None) -> tuple[bool, str]:

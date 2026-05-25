@@ -16,14 +16,15 @@ createApp({
     const schedulerConfig = ref({rss_cron: '0 4 * * *', rss_enabled: 'true'})
     const downloadConfig = ref({download_dir: '', temp_dir: '', max_concurrent: '2', thread_count: '8', move_to_nas: 'true'})
     const proxyConfig = ref({enabled: 'false', type: 'http', host: '', port: '7890'})
-    const newSource = ref({name:'', url:'', feed_type: 'jable'})
+    const newSource = ref({name:'', url:'', feed_type: 'webpage', poll_cron: '0 4 * * *'})
     const deleteTarget = ref(null)
     const editingSource = ref(null)
     const showAddModal = ref(false)
+    const showPollModal = ref(false)
     const addUrl = ref('')
     const adding = ref(false)
     const addMsg = ref('')
-    const addMode = ref('jable')
+    const addMode = ref('url')
     const addM3u8Url = ref('')
     const addM3u8Name = ref('')
     const addM3u8Headers = ref('')
@@ -314,6 +315,7 @@ createApp({
 
 
     async function pollNow() {
+      // 旧方法保留兼容，实际使用 pollSourceById
       polling.value = true
       pollMsg.value = ''
       try {
@@ -326,15 +328,41 @@ createApp({
       polling.value = false
     }
 
+    async function pollSourceById(sourceId) {
+      showPollModal.value = false
+      polling.value = true
+      pollMsg.value = ''
+      try {
+        const r = await fetch(`/api/sources/${sourceId}/poll`, {method:'POST'})
+        const d = await r.json()
+        pollMsg.value = d.message || ''
+        setTimeout(() => pollMsg.value = '', 5000)
+        await fetchTasks()
+      } catch(e) { pollMsg.value = '轮询失败' }
+      polling.value = false
+    }
+
     async function addSource() {
       if (!newSource.value.name || !newSource.value.url) return
       await fetch('/api/sources', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(newSource.value)})
-      newSource.value = {name:'', url:'', feed_type:'jable'}
+      newSource.value = {name:'', url:'', feed_type:'webpage', poll_cron: '0 4 * * *'}
       await fetchSources()
     }
 
     function editSource(s) {
-      editingSource.value = {id: s.id, name: s.name, url: s.url, feed_type: s.feed_type, enabled: s.enabled}
+      editingSource.value = {
+        id: s.id, name: s.name, url: s.url, feed_type: s.feed_type, enabled: s.enabled,
+        poll_cron: s.poll_cron || '0 4 * * *',
+        page_url_pattern: s.page_url_pattern || '',
+        title_selector: s.title_selector || '',
+        m3u8_selector: s.m3u8_selector || '',
+        video_id_pattern: s.video_id_pattern || '',
+        referer: s.referer || '',
+        headers: s.headers || '',
+        key_selector: s.key_selector || '',
+        iv_selector: s.iv_selector || '',
+        refresh_url_pattern: s.refresh_url_pattern || '',
+      }
     }
 
     async function saveSource() {
@@ -351,6 +379,16 @@ createApp({
     async function toggleSource(s) {
       await fetch(`/api/sources/${s.id}`, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify({enabled: !s.enabled})})
       await fetchSources()
+    }
+
+    async function pollSource(s) {
+      try {
+        const r = await fetch(`/api/sources/${s.id}/poll`, {method:'POST'})
+        const d = await r.json()
+        pollMsg.value = d.message || ''
+        setTimeout(() => { if (pollMsg.value === d.message) pollMsg.value = '' }, 5000)
+        await fetchTasks()
+      } catch(e) { pollMsg.value = '轮询失败' }
     }
 
     async function delSource(id) {
@@ -426,7 +464,7 @@ createApp({
 
     const canAddVideo = computed(() => {
       if (adding.value) return false
-      if (addMode.value === 'jable') return !!addUrl.value
+      if (addMode.value === 'url') return !!addUrl.value
       return !!addM3u8Url.value
     })
 
@@ -436,7 +474,7 @@ createApp({
       addMsg.value = ''
       try {
         let r
-        if (addMode.value === 'jable') {
+        if (addMode.value === 'url') {
           r = await fetch('/api/tasks/from-url', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -521,8 +559,9 @@ createApp({
     })
 
     return { tasks, sources, filter, tab, detailTask, logContent, logBox, pollMsg, polling, starting, schedulerConfig, downloadConfig, newSource, deleteTarget, editingSource,
+             showAddModal, showPollModal,
              activeCount, completedCount, failedCount, waitingCount, stoppedCount, downloadingCount, mergingCount, movingCount, totalSpeed, filteredTasks, stageLabel, relativeTime,
-             fetchTasks, fetchSources, fetchScheduler, fetchConfig, pollNow, addSource, editSource, saveSource, toggleSource, delSource, toggleScheduler, updateScheduler,
+             fetchTasks, fetchSources, fetchScheduler, fetchConfig, pollNow, pollSourceById, addSource, editSource, saveSource, toggleSource, delSource, pollSource, toggleScheduler, updateScheduler,
              deleteTask, confirmDelete, showLog, closeLog,
              configSaved, configSaving, saveDownloadConfig, saveSchedulerConfig, retryTask, startTask, stopTask,
              selected, selectedCount, allSelected, canBatchStart, canBatchStop, canBatchRetry, viewMode, page, pageSize, totalPages, showPagination, goPage, setPageSize,
