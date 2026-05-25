@@ -97,38 +97,45 @@ def _copy_with_progress(task_id: str, src: Path, dest: Path, total_size: int, st
 
 
 def _copy_with_dd(task_id: str, src: Path, dest: Path, total_size: int, start: float):
-    """Linux dd 命令复制，带进度汇报"""
+    """Linux cp 命令复制，带进度汇报（解决 dd stdout 管道丢失问题）"""
     proc = subprocess.Popen(
-        ["dd", "if=" + str(src), "of=" + str(dest), "bs=4M", "status=progress"],
+        ['cp', '--reflink=auto', str(src), str(dest)],
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.PIPE,
         universal_newlines=True
     )
 
-    for line in iter(proc.stdout.readline, ''):
-        line = line.strip()
-        if not line:
-            continue
-        copied_bytes = 0
-        m = re.search(r'([\d.]+)\s*字节', line)
-        if not m:
-            m = re.search(r'([\d.]+)\s*bytes', line, re.IGNORECASE)
-        if m:
-            copied_bytes = float(m.group(1))
-            elapsed = time.time() - start
-            progress = min(int(copied_bytes * 100 / total_size), 99)
-            speed_mbps = copied_bytes / (1024 * 1024) / elapsed if elapsed > 0 else 0
-            update_task(task_id,
-                       stage="moving",
-                       progress=progress,
-                       move_speed=f"{speed_mbps:.1f}MB/s",
-                       move_elapsed=f"{int(elapsed)}s")
+    # 后台线程监控进度（cp 不支持 progress 输出，靠轮询文件大小）
+    def monitor_progress():
+        last_size = 0
+        while proc.poll() is None:
+            try:
+                if dest.exists():
+                    cur_size = dest.stat().st_size
+                    if cur_size != last_size:
+                        elapsed = time.time() - start
+                        speed_mbps = cur_size / (1024 * 1024) / elapsed if elapsed > 0 else 0
+                        progress = min(int(cur_size * 100 / total_size), 99)
+                        update_task(task_id,
+                                   stage="moving",
+                                   progress=progress,
+                                   move_speed=f"{speed_mbps:.1f}MB/s",
+                                   move_elapsed=f"{int(elapsed)}s")
+                        last_size = cur_size
+                    time.sleep(0.5)
+            except Exception:
+                pass
+
+    monitor_thread = threading.Thread(target=monitor_progress, daemon=True)
+    monitor_thread.start()
 
     proc.wait()
+    stdout, stderr = proc.communicate()
+
     if proc.returncode != 0:
         if dest.exists():
             dest.unlink()
-        update_task(task_id, error=f"转移失败: dd exit={proc.returncode}")
+        update_task(task_id, error=f"转移失败: cp exit={proc.returncode}\n{stderr[:200]}")
         return
 
     update_task(task_id, status="completed", stage="completed",
