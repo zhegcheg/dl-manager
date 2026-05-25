@@ -46,6 +46,18 @@
       </div>
     </div>
 
+    <!-- 搜索 + 排序 -->
+    <div class="search-sort-bar">
+      <input class="search-input" type="text" placeholder="🔍 搜索任务名称或 ID..." v-model="searchQuery" @input="onSearchChange">
+      <select class="sort-select" v-model="sortBy">
+        <option value="default">默认排序</option>
+        <option value="created_desc">创建时间 ↓</option>
+        <option value="created_asc">创建时间 ↑</option>
+        <option value="name">名称 A-Z</option>
+        <option value="status">按状态</option>
+      </select>
+    </div>
+
     <div class="filter-bar">
       <button class="filter-btn" :class="{active: filter==null}" @click="filter=null">全部</button>
       <button class="filter-btn" :class="{active: filter=='waiting'}" @click="filter='waiting'">等待([[ waitingCount ]])</button>
@@ -58,10 +70,10 @@
     </div>
 
     <div class="task-grid" v-if="viewMode==='grid' && filteredTasks.length">
-      <div class="task-card" v-for="t in filteredTasks" :key="t.id" :class="{selected: selected.includes(t.id)}">
+      <div class="task-card" v-for="t in filteredTasks" :key="t.id" :class="{selected: selected.includes(t.id)}" @click="showDetail(t)">
         <div class="top">
           <div style="display:flex;align-items:center;gap:8px;">
-            <input type="checkbox" :checked="selected.includes(t.id)" @change="toggleSelect(t)" style="accent-color:#ff6b9d;">
+            <input type="checkbox" :checked="selected.includes(t.id)" @change="toggleSelect(t)" @click.stop style="accent-color:#ff6b9d;">
             <div class="name">[[ t.name ]]</div>
           </div>
           <div class="id">[[ t.id ]]</div>
@@ -70,10 +82,10 @@
           <span v-if="t.retry_count > 0" style="font-size:11px;color:#888;margin-right:8px;">重试 [[ t.retry_count ]]/3</span>
           <span class="stage" :class="t.stage">[[ stageLabel(t.stage) ]]</span>
           <div class="task-actions">
-            <button v-if="t.stage === 'waiting' || t.stage === 'stopped'" class="btn sm" style="border-color:#60a5fa;color:#60a5fa;" @click="startTask(t)" title="开始">▶ 开始</button>
-            <button v-if="t.stage === 'failed'" class="btn sm" style="border-color:#4ade80;color:#4ade80;" @click="retryTask(t)" title="重试">🔄 重试</button>
-            <button v-if="t.stage === 'downloading' || t.stage === 'merging' || t.stage === 'moving'" class="btn sm" style="border-color:#fbbf24;color:#fbbf24;" @click="stopTask(t)" title="暂停">⏸ 暂停</button>
-            <button class="btn danger sm" @click="deleteTask(t)" title="删除">🗑 删除</button>
+            <button v-if="t.stage === 'waiting' || t.stage === 'stopped'" class="btn sm" style="border-color:#60a5fa;color:#60a5fa;" @click.stop="startTask(t)" title="开始">▶ 开始</button>
+            <button v-if="t.stage === 'failed'" class="btn sm" style="border-color:#4ade80;color:#4ade80;" @click.stop="retryTask(t)" title="重试">🔄 重试</button>
+            <button v-if="t.stage === 'downloading' || t.stage === 'merging' || t.stage === 'moving'" class="btn sm" style="border-color:#fbbf24;color:#fbbf24;" @click.stop="stopTask(t)" title="暂停">⏸ 暂停</button>
+            <button class="btn danger sm" @click.stop="deleteTask(t)" title="删除">🗑 删除</button>
           </div>
         </div>
         <div class="progress-bar" v-if="t.stage === 'downloading' || t.stage === 'merging' || t.stage === 'moving'">
@@ -86,7 +98,8 @@
             <span v-if="t.chunks && t.stage==='downloading'"> [[ t.chunks ]] 块</span>
             <span v-if="t.move_elapsed && t.stage==='moving'"> [[ t.move_elapsed ]]</span>
             <span v-if="t.stage==='completed'">✅ 已完成
-              <a :href="'/player.html?id=' + t.id" target="_blank" style="color:#60a5fa;text-decoration:none;margin-left:4px;font-size:12px;" title="播放">▶ 播放</a></span>
+              <span class="completed-time" v-if="t.completed_at"> · [[ relativeTime(t.completed_at) ]]</span>
+              <a :href="'/player.html?id=' + t.id" target="_blank" @click.stop style="color:#60a5fa;text-decoration:none;margin-left:4px;font-size:12px;" title="播放">▶ 播放</a></span>
             
             <span v-if="t.stage==='failed'">❌ [[ t.error ]]</span>
           </div>
@@ -97,8 +110,8 @@
 
     <!-- 列表视图 -->
     <div class="task-list" v-if="viewMode==='list' && filteredTasks.length">
-      <div class="list-row" v-for="t in filteredTasks" :key="t.id" :class="{selected: selected.includes(t.id)}">
-        <input type="checkbox" :checked="selected.includes(t.id)" @change="toggleSelect(t)" style="accent-color:#ff6b9d;">
+      <div class="list-row" v-for="t in filteredTasks" :key="t.id" :class="{selected: selected.includes(t.id)}" @click="showDetail(t)">
+        <input type="checkbox" :checked="selected.includes(t.id)" @change="toggleSelect(t)" @click.stop style="accent-color:#ff6b9d;">
         <div class="list-name" :title="t.name">[[ t.name ]]</div>
         <span v-if="t.retry_count > 0" style="font-size:10px;color:#888;white-space:nowrap;margin-right:4px;">重试[[ t.retry_count ]]/3</span>
         <span class="stage" :class="t.stage" style="font-size:11px;padding:2px 8px;white-space:nowrap;">[[ stageLabel(t.stage) ]]</span>
@@ -112,14 +125,15 @@
         <span v-if="t.segments && t.stage==='downloading'" style="font-size:10px;color:#666;white-space:nowrap;">[[ t.segments ]]片</span>
         <span v-if="t.move_speed && t.move_speed!=='done' && t.stage==='moving'" style="font-size:11px;color:#fbbf24;white-space:nowrap;">[[ t.move_speed ]]</span>
         <span v-if="t.stage==='completed'" style="font-size:11px;color:#4ade80;white-space:nowrap;">✅已完成
-          <a :href="'/player.html?id=' + t.id" target="_blank" style="color:#60a5fa;text-decoration:none;margin-left:4px;" title="播放">▶ 播放</a></span>
+          <span class="completed-time" v-if="t.completed_at"> · [[ relativeTime(t.completed_at) ]]</span>
+          <a :href="'/player.html?id=' + t.id" target="_blank" @click.stop style="color:#60a5fa;text-decoration:none;margin-left:4px;" title="播放">▶ 播放</a></span>
         
         <span v-if="t.stage==='failed'" style="font-size:11px;color:#f87171;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px;" :title="t.error">❌[[ t.error ]]</span>
         <div class="list-actions">
-          <button v-if="t.stage === 'waiting' || t.stage === 'stopped'" class="btn sm" style="border-color:#60a5fa;color:#60a5fa;padding:2px 8px;font-size:11px;" @click="startTask(t)">▶</button>
-          <button v-if="t.stage === 'failed'" class="btn sm" style="border-color:#4ade80;color:#4ade80;padding:2px 8px;font-size:11px;" @click="retryTask(t)">🔄</button>
-          <button v-if="t.stage === 'downloading' || t.stage === 'merging' || t.stage === 'moving'" class="btn sm" style="border-color:#fbbf24;color:#fbbf24;padding:2px 8px;font-size:11px;" @click="stopTask(t)">⏸</button>
-          <button class="btn danger sm" style="padding:2px 8px;font-size:11px;" @click="deleteTask(t)">🗑</button>
+          <button v-if="t.stage === 'waiting' || t.stage === 'stopped'" class="btn sm" style="border-color:#60a5fa;color:#60a5fa;padding:2px 8px;font-size:11px;" @click.stop="startTask(t)">▶</button>
+          <button v-if="t.stage === 'failed'" class="btn sm" style="border-color:#4ade80;color:#4ade80;padding:2px 8px;font-size:11px;" @click.stop="retryTask(t)">🔄</button>
+          <button v-if="t.stage === 'downloading' || t.stage === 'merging' || t.stage === 'moving'" class="btn sm" style="border-color:#fbbf24;color:#fbbf24;padding:2px 8px;font-size:11px;" @click.stop="stopTask(t)">⏸</button>
+          <button class="btn danger sm" style="padding:2px 8px;font-size:11px;" @click.stop="deleteTask(t)">🗑</button>
         </div>
       </div>
     </div>
@@ -352,6 +366,70 @@
         <button class="btn sm" :disabled="!canAddVideo || adding" @click="doAddVideo" style="border-color:#ff6b9d;color:#ff6b9d;">[[ adding ? '添加中...' : '添加' ]]</button>
       </div>
       <div v-if="addMsg" class="form-group" :class="addMsg.indexOf('失败')>=0?'error':'success'">[[ addMsg ]]</div>
+    </div>
+  </div>
+
+  <!-- 任务详情弹窗 -->
+  <div class="overlay" v-if="detailModal" @click.self="closeDetail">
+    <div class="panel detail-panel">
+      <div class="panel-header">
+        <h2>任务详情</h2>
+        <button class="panel-close" @click="closeDetail">×</button>
+      </div>
+      <div class="panel-body detail-body">
+        <div class="detail-row">
+          <span class="detail-label">任务 ID</span>
+          <span class="detail-val mono">[[ detailModal.id ]]</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">名称</span>
+          <span class="detail-val">[[ detailModal.name ]]</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">状态</span>
+          <span class="detail-val">
+            <span class="stage" :class="detailModal.stage">[[ stageLabel(detailModal.stage) ]]</span>
+            <span v-if="detailModal.progress"> [[ Math.round(detailModal.progress) ]]%</span>
+          </span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">创建时间</span>
+          <span class="detail-val">[[ detailModal.created_at ? relativeTime(detailModal.created_at) : '-' ]]</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-label">完成时间</span>
+          <span class="detail-val">[[ detailModal.completed_at ? relativeTime(detailModal.completed_at) : '-' ]]</span>
+        </div>
+        <div class="detail-row" v-if="detailModal.file">
+          <span class="detail-label">下载文件</span>
+          <span class="detail-val path">[[ detailModal.file ]]</span>
+        </div>
+        <div class="detail-row" v-if="detailModal.final_path">
+          <span class="detail-label">转存路径</span>
+          <span class="detail-val path">[[ detailModal.final_path ]]</span>
+        </div>
+        <div class="detail-row" v-if="detailModal.error">
+          <span class="detail-label">错误信息</span>
+          <span class="detail-val err">[[ detailModal.error ]]</span>
+        </div>
+        <div class="detail-row" v-if="detailModal.speed">
+          <span class="detail-label">下载速度</span>
+          <span class="detail-val">[[ detailModal.speed ]]</span>
+        </div>
+        <div class="detail-row" v-if="detailModal.retry_count > 0">
+          <span class="detail-label">重试次数</span>
+          <span class="detail-val">[[ detailModal.retry_count ]]/3</span>
+        </div>
+      </div>
+      <!-- 实时日志区域 -->
+      <div class="detail-log-header">📝 实时日志</div>
+      <div class="log-box detail-log" ref="logBox" v-text="logContent || '等待日志...'"></div>
+      <div class="panel-footer">
+        <button v-if="detailModal.stage === 'waiting' || detailModal.stage === 'stopped'" class="btn" style="border-color:#60a5fa;color:#60a5fa;" @click="startTask(detailModal)">▶ 开始</button>
+        <button v-if="detailModal.stage === 'failed'" class="btn" style="border-color:#4ade80;color:#4ade80;" @click="retryTask(detailModal)">🔄 重试</button>
+        <button v-if="['downloading','merging','moving'].includes(detailModal.stage)" class="btn" style="border-color:#fbbf24;color:#fbbf24;" @click="stopTask(detailModal)">⏸ 暂停</button>
+        <button class="btn" @click="closeDetail">关闭</button>
+      </div>
     </div>
   </div>
 

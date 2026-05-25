@@ -222,6 +222,9 @@ def list_tasks(status: str = None, limit: int = 500, order_by: str = None) -> li
 
 def update_task(task_id: str, reset_retry: bool = False, **fields):
     fields["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    # 任务完成时自动记录完成时间
+    if fields.get("status") == "completed" and "completed_at" not in fields:
+        fields["completed_at"] = datetime.utcnow().isoformat() + "Z"
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [task_id]
     for attempt in range(3):

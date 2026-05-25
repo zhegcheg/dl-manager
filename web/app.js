@@ -32,6 +32,9 @@ createApp({
     const configSaving = ref(false)
     const proxySaved = ref('')
     const proxySaving = ref(false)
+    const searchQuery = ref('')
+    const sortBy = ref('default')  // default | created_asc | created_desc | name | status
+    const detailModal = ref(null)   // task object for detail modal
     let pollTimer = null
     let logSource = null
     let taskSource = null
@@ -76,15 +79,53 @@ createApp({
     const pageSize = ref(36)
     const page = ref(1)
     const selectedCount = computed(() => selected.value.length)
+    function relativeTime(dateStr) {
+      if (!dateStr) return ''
+      const d = new Date(dateStr.replace('Z', '+00:00'))
+      if (isNaN(d.getTime())) return dateStr
+      const now = Date.now()
+      const diff = Math.floor((now - d.getTime()) / 1000)
+      if (diff < 0) return '刚刚'
+      if (diff < 60) return `${diff}秒前`
+      if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`
+      if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`
+      if (diff < 2592000) return `${Math.floor(diff / 86400)}天前`
+      // 超过30天显示具体日期
+      return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    }
+
+    const stagePriority = {downloading:0, merging:1, moving:2, waiting:3, completed:4, failed:5, stopped:6}
+
     const allSorted = computed(() => {
+      // 1. 按 stage 过滤
       let list = filter.value ? tasks.value.filter(t => t.stage === filter.value) : [...tasks.value]
-      const priority = {downloading:0, merging:1, moving:2, waiting:3, completed:4, failed:5, stopped:6}
-      list.sort((a, b) => {
-        const pa = priority[a.stage] ?? 7
-        const pb = priority[b.stage] ?? 7
-        if (pa !== pb) return pa - pb
-        return (b.created_at || '').localeCompare(a.created_at || '')
-      })
+      // 2. 模糊搜索
+      const q = searchQuery.value.trim().toLowerCase()
+      if (q) {
+        list = list.filter(t => (t.name || '').toLowerCase().includes(q) || (t.id || '').toLowerCase().includes(q))
+      }
+      // 3. 排序
+      if (sortBy.value === 'created_asc') {
+        list.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))
+      } else if (sortBy.value === 'created_desc') {
+        list.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+      } else if (sortBy.value === 'name') {
+        list.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh'))
+      } else if (sortBy.value === 'status') {
+        list.sort((a, b) => {
+          const pa = stagePriority[a.stage] ?? 7
+          const pb = stagePriority[b.stage] ?? 7
+          return pa - pb
+        })
+      } else {
+        // default: 阶段优先级 + 时间倒序
+        list.sort((a, b) => {
+          const pa = stagePriority[a.stage] ?? 7
+          const pb = stagePriority[b.stage] ?? 7
+          if (pa !== pb) return pa - pb
+          return (b.created_at || '').localeCompare(a.created_at || '')
+        })
+      }
       return list
     })
     const showPagination = computed(() => allSorted.value && allSorted.value.length > pageSize.value)
@@ -344,6 +385,27 @@ createApp({
       await fetchTasks()
     }
 
+    // 搜索改变时回到第一页
+    function onSearchChange() { page.value = 1 }
+
+    function showDetail(t) {
+      detailModal.value = t
+      logContent.value = ''
+      if (logSource) { logSource.close(); logSource = null }
+      const es = new EventSource(`/api/tasks/${t.id}/logs`)
+      logSource = es
+      es.onmessage = e => {
+        logContent.value += e.data.replace(/data:\s*/, '') + '\n'
+        nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
+      }
+      es.onerror = () => {}
+    }
+    function closeDetail() {
+      if (logSource) { logSource.close(); logSource = null }
+      detailModal.value = null
+      logContent.value = ''
+    }
+
     function showLog(t) {
       detailTask.value = t
       logContent.value = ''
@@ -459,7 +521,7 @@ createApp({
     })
 
     return { tasks, sources, filter, tab, detailTask, logContent, logBox, pollMsg, polling, starting, schedulerConfig, downloadConfig, newSource, deleteTarget, editingSource,
-             activeCount, completedCount, failedCount, waitingCount, stoppedCount, downloadingCount, mergingCount, movingCount, totalSpeed, filteredTasks, stageLabel,
+             activeCount, completedCount, failedCount, waitingCount, stoppedCount, downloadingCount, mergingCount, movingCount, totalSpeed, filteredTasks, stageLabel, relativeTime,
              fetchTasks, fetchSources, fetchScheduler, fetchConfig, pollNow, addSource, editSource, saveSource, toggleSource, delSource, toggleScheduler, updateScheduler,
              deleteTask, confirmDelete, showLog, closeLog,
              configSaved, configSaving, saveDownloadConfig, saveSchedulerConfig, retryTask, startTask, stopTask,
@@ -467,6 +529,7 @@ createApp({
              toggleSelect, toggleSelectAll, batchStart, batchStop, batchRetry, batchDelete, toggleViewMode,
              showAddModal, addUrl, adding, addMsg, doAddVideo, canAddVideo,
              addMode, addM3u8Url, addM3u8Name, addM3u8Headers, addDownloadDir,
-             proxyConfig, proxySaved, proxySaving, saveProxyConfig }
+             proxyConfig, proxySaved, proxySaving, saveProxyConfig,
+             searchQuery, sortBy, onSearchChange, detailModal, showDetail, closeDetail }
   }
 }).mount('#app')
