@@ -7,9 +7,6 @@
   <title>DL Manager</title>
   <link rel="stylesheet" href="style.css">
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-  <script src="components/SourcesView.js"></script>
-  <script src="components/SettingsView.js"></script>
-  <script src="components/LogsView.js"></script>
 </head>
 <body>
 <div id="app" v-cloak>
@@ -173,15 +170,13 @@
     <sources-view
       :sources="sources"
       :new-source="newSource"
-      :editing-source="editingSource"
       @add-source="addSource"
       @toggle-source="toggleSource"
       @poll-source="pollSource"
       @edit-source="editSource"
       @del-source="delSource"
       @save-source="saveSource"
-      @update:new-source="v => newSource = v"
-      @update:editing-source="v => editingSource = v">
+      @update:new-source="v => newSource = v">
     </sources-view>
   </div>
 
@@ -467,6 +462,7 @@
 
   <script src="components/SourcesView.js"></script>
   <script src="components/SettingsView.js"></script>
+  <script src="components/LogsView.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
