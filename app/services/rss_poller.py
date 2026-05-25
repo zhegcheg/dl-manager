@@ -32,9 +32,17 @@ def _get_proxy_opener():
         proxy_type = cfg.get("type", "http")
         host = cfg.get("host", "").strip()
         port = cfg.get("port", "7890").strip()
+        username = cfg.get("username", "").strip()
+        password = cfg.get("password", "").strip()
         if not host:
             return None
-        proxy_url = f"{proxy_type}://{host}:{port}"
+        # 构建代理 URL（支持用户名密码认证）
+        if username and password:
+            from urllib.parse import quote
+            auth = f"{quote(username)}:{quote(password)}@"
+        else:
+            auth = ""
+        proxy_url = f"{proxy_type}://{auth}{host}:{port}"
         proxy_handler = urllib.request.ProxyHandler({
             "http": proxy_url,
             "https": proxy_url,

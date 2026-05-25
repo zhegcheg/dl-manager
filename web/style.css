@@ -22,7 +22,10 @@
     .stat.active .val { color: #4ade80; }
     .stat.done .val { color: #60a5fa; }
     .stat.fail .val { color: #f87171; }
-    .filter-bar { display: flex; gap: 8px; margin-bottom: 20px; }
+    /* Card 容器样式 */
+    .card { background: #1a1a1a; border-radius: 12px; padding: 16px; border: 1px solid #2a2a2a; }
+    .card-title { font-size: 14px; font-weight: 600; color: #ff6b9d; margin-bottom: 12px; }
+    .filter-bar { display: flex; gap: 8px; margin-bottom: 20px; align-items: center; flex-wrap: wrap; }
     .filter-btn { padding: 6px 16px; border-radius: 20px; border: 1px solid #333; background: #1a1a1a; color: #888; cursor: pointer; font-size: 13px; transition: all 0.2s; }
     .filter-btn:hover { border-color: #ff6b9d; color: #ff6b9d; }
     .filter-btn.active { background: #ff6b9d; border-color: #ff6b9d; color: #fff; }
@@ -161,7 +164,215 @@
 .detail-val.err { color: #f87171; }
 .detail-log-header { padding: 10px 20px 4px; font-size: 13px; color: #888; border-top: 1px solid #333; }
 .detail-log { max-height: 30vh; border-radius: 0 0 16px 16px; }
+.detail-tabs { display: flex; border-bottom: 1px solid #333; padding: 0 16px; }
+.detail-tab { padding: 10px 16px; background: none; border: none; border-bottom: 2px solid transparent; color: #888; cursor: pointer; font-size: 13px; transition: all 0.2s; }
+.detail-tab.active { color: #ff6b9d; border-bottom-color: #ff6b9d; }
+.detail-tab:hover { color: #ff6b9d; }
+.history-log-container { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
 /* Clickable task cards/rows */
 .task-card { cursor: pointer; }
 .list-row { cursor: pointer; }
+
+/* Monitor */
+.monitor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.monitor-card { background: #1a1a1a; border-radius: 12px; padding: 20px; border: 1px solid #2a2a2a; text-align: center; }
+.monitor-title { font-size: 13px; color: #888; margin-bottom: 8px; }
+.monitor-value { font-size: 32px; font-weight: 700; color: #4ade80; margin-bottom: 4px; }
+.monitor-sub { font-size: 12px; color: #666; }
+.chart-container { background: #1a1a1a; border-radius: 12px; padding: 16px; border: 1px solid #2a2a2a; margin-bottom: 12px; }
+.chart-container canvas { width: 100% !important; display: block; }
+
+/* 日志级别颜色 */
+.log-error { color: #f87171; }
+.log-warn { color: #fbbf24; }
+.log-info { color: #4ade80; }
+.log-debug { color: #60a5fa; }
+.log-default { color: #ccc; }
+
+/* 设置页面样式 */
+.settings-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.settings-header {
+  margin-bottom: 32px;
+  text-align: center;
+}
+
+.settings-header h2 {
+  font-size: 24px;
+  color: #ff6b9d;
+  margin: 0 0 8px 0;
+}
+
+.settings-header .settings-desc {
+  font-size: 14px;
+  color: #888;
+  margin: 0;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 24px;
+}
+
+.settings-card {
+  background: #1a1a1a;
+  border-radius: 12px;
+  border: 1px solid #333;
+  overflow: hidden;
+  transition: border-color 0.2s;
+}
+
+.settings-card:hover {
+  border-color: #444;
+}
+
+.settings-card.full-width {
+  grid-column: 1 / -1;
+}
+
+.card-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid #333;
+  background: #1f1f1f;
+}
+
+.card-header h3 {
+  font-size: 16px;
+  color: #ff6b9d;
+  margin: 0;
+}
+
+.card-body {
+  padding: 20px;
+}
+
+.card-footer {
+  padding: 16px 20px;
+  border-top: 1px solid #333;
+  background: #1f1f1f;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-group:last-child {
+  margin-bottom: 0;
+}
+
+.form-label {
+  display: block;
+  font-size: 13px;
+  color: #e0e0e0;
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+
+.form-hint {
+  color: #888;
+  font-size: 12px;
+  font-weight: normal;
+  margin-left: 4px;
+}
+
+.form-input {
+  width: 100%;
+  background: #0f0f0f;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: #fff;
+  font-size: 13px;
+  transition: border-color 0.2s;
+  box-sizing: border-box;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: #ff6b9d;
+}
+
+.form-input-sm {
+  max-width: 120px;
+}
+
+.form-select {
+  background: #0f0f0f;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.2s;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.form-select:focus {
+  outline: none;
+  border-color: #ff6b9d;
+}
+
+.form-row {
+  display: flex;
+  gap: 16px;
+}
+
+.form-row .form-group {
+  flex: 1;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toggle-path {
+  font-size: 12px;
+  color: #888;
+  flex: 1;
+}
+
+.toggle-status {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.success-msg {
+  color: #4ade80;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.btn-primary {
+  background: #ff6b9d;
+  border-color: #ff6b9d;
+  color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #ff8db8;
+  border-color: #ff8db8;
+}
+
+/* 响应式布局 */
+@media (max-width: 900px) {
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .settings-card.full-width {
+    grid-column: 1;
+  }
+}

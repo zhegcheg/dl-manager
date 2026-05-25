@@ -4,6 +4,9 @@
 import json
 import shutil
 import asyncio
+import time
+import psutil
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +23,125 @@ from app.services.queue import get_active_downloads, is_downloading, try_start_n
 from app.events import subscribe, unsubscribe
 
 router = APIRouter()
+
+# 保存运行中的进程
+running_procs = {}
+
+# ====== 系统资源监控 ======
+
+# 用于计算网络速度的全局变量
+_net_io_last = {"bytes_sent": 0, "bytes_recv": 0, "time": 0}
+
+# 缓存的 CPU 百分比（后台线程更新，避免阻塞事件循环）
+_cpu_percent_cache = {"value": 0.0, "time": 0}
+
+import concurrent.futures
+_stats_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="stats")
+
+# 系统统计结果缓存（避免多个 SSE 订阅者重复计算 psutil）
+_stats_result_cache = {"data": None, "time": 0}
+_STATS_CACHE_TTL = 4  # 缓存 4 秒
+
+def _update_cpu_cache():
+    """在后台线程更新 CPU 缓存（阻塞 0.5s，但不影响事件循环）"""
+    import time as _t
+    now = _t.time()
+    if now - _cpu_percent_cache["time"] > 1.5:  # 最多每 1.5s 更新一次
+        _cpu_percent_cache["value"] = psutil.cpu_percent(interval=0.5)
+        _cpu_percent_cache["time"] = now
+
+@router.get("/api/system/stats")
+def get_system_stats():
+    """获取系统资源使用情况"""
+    global _net_io_last
+    
+    # 检查缓存是否有效
+    now = time.time()
+    if _stats_result_cache["data"] and (now - _stats_result_cache["time"]) < _STATS_CACHE_TTL:
+        return _stats_result_cache["data"]
+    
+    # 在后台线程更新 CPU 缓存，不阻塞当前线程
+    _stats_executor.submit(_update_cpu_cache)
+    cpu_percent = _cpu_percent_cache["value"]
+    cpu_count = psutil.cpu_count()
+    
+    # 内存
+    mem = psutil.virtual_memory()
+    
+    # 磁盘（下载目录）
+    try:
+        cfg = get_download_config()
+        download_dir = cfg.get("download_dir", "/tmp")
+        disk = psutil.disk_usage(download_dir)
+    except:
+        disk = psutil.disk_usage("/")
+    
+    # 网络速度（计算两次采样的差值）
+    net_io = psutil.net_io_counters()
+    now = time.time()
+    if _net_io_last["time"] > 0:
+        dt = now - _net_io_last["time"]
+        if dt > 0:
+            upload_speed = (net_io.bytes_sent - _net_io_last["bytes_sent"]) / dt
+            download_speed = (net_io.bytes_recv - _net_io_last["bytes_recv"]) / dt
+        else:
+            upload_speed = download_speed = 0
+    else:
+        upload_speed = download_speed = 0
+    _net_io_last = {
+        "bytes_sent": net_io.bytes_sent,
+        "bytes_recv": net_io.bytes_recv,
+        "time": now
+    }
+    
+    result = {
+        "cpu": {
+            "percent": cpu_percent,
+            "count": cpu_count,
+        },
+        "memory": {
+            "total": mem.total,
+            "used": mem.used,
+            "percent": mem.percent,
+            "total_gb": round(mem.total / (1024**3), 1),
+            "used_gb": round(mem.used / (1024**3), 1),
+        },
+        "disk": {
+            "total": disk.total,
+            "used": disk.used,
+            "free": disk.free,
+            "percent": disk.percent,
+            "total_gb": round(disk.total / (1024**3), 1),
+            "used_gb": round(disk.used / (1024**3), 1),
+            "free_gb": round(disk.free / (1024**3), 1),
+        },
+        "network": {
+            "upload_speed": round(upload_speed / 1024, 1),  # KB/s
+            "download_speed": round(download_speed / 1024, 1),  # KB/s
+            "bytes_sent_total": net_io.bytes_sent,
+            "bytes_recv_total": net_io.bytes_recv,
+        }
+    }
+    
+    # 更新缓存
+    _stats_result_cache["data"] = result
+    _stats_result_cache["time"] = time.time()
+    
+    return result
+
+
+@router.get("/api/system/stats/stream")
+async def stream_system_stats():
+    """SSE 推送系统资源使用情况"""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    async def generate():
+        while True:
+            # 在线程池中执行阻塞的 psutil 调用
+            stats = await loop.run_in_executor(_stats_executor, get_system_stats)
+            yield f"data: {json.dumps(stats, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(5)
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 running_procs = {}  # legacy, keep for manual stop
 
@@ -41,8 +163,9 @@ async def task_events():
 
     async def event_generator():
         try:
-            # 连接时立即推送一次当前任务列表
-            tasks = list_tasks()
+            # 连接时立即推送一次当前任务列表（在线程池中执行同步 DB 查询）
+            loop = asyncio.get_event_loop()
+            tasks = await loop.run_in_executor(None, list_tasks)
             for t in tasks:
                 t.pop("m3u8_url", None)
             yield f"data: {json.dumps({'total': len(tasks), 'list': tasks})}\n\n"
@@ -70,6 +193,186 @@ def get_tasks(status: Optional[str] = None):
     for t in tasks:
         t.pop("m3u8_url", None)
     return {"total": len(tasks), "list": tasks}
+
+
+# ====== 批量操作接口（必须在 {task_id} 路由之前定义，避免路由冲突） ======
+
+class BatchTaskRequest(BaseModel):
+    ids: list[str]
+
+
+@router.post("/api/tasks/batch/start")
+def batch_start_tasks(body: BatchTaskRequest):
+    """批量开始任务"""
+    from app.services.queue import register_download
+    from app.services.downloader import start_download
+    cfg = get_download_config()
+    max_concurrent = int(cfg.get("max_concurrent", "2"))
+    
+    success = []
+    failed = []
+    queued = []
+    
+    for task_id in body.ids:
+        try:
+            task = get_task(task_id)
+            if not task:
+                failed.append({"id": task_id, "reason": "任务不存在"})
+                continue
+            if task["status"] in ("downloading", "merging", "moving"):
+                failed.append({"id": task_id, "reason": "任务已在运行"})
+                continue
+            if is_downloading(task_id):
+                failed.append({"id": task_id, "reason": "任务已在运行"})
+                continue
+            
+            if get_active_downloads() >= max_concurrent:
+                update_task(task_id, status="waiting", stage="waiting")
+                queued.append(task_id)
+            else:
+                proc = start_download(task_id, task["m3u8_url"], task["headers"],
+                                      task.get("key", ""), task.get("iv", ""))
+                running_procs[task_id] = proc
+                success.append(task_id)
+        except Exception as e:
+            failed.append({"id": task_id, "reason": str(e)})
+    
+    try_start_next()
+    return {
+        "message": f"成功 {len(success)} 个，排队 {len(queued)} 个，失败 {len(failed)} 个",
+        "success": success,
+        "queued": queued,
+        "failed": failed
+    }
+
+
+@router.post("/api/tasks/batch/stop")
+def batch_stop_tasks(body: BatchTaskRequest):
+    """批量暂停任务"""
+    from app.services.queue import is_downloading as qm_is_running, unregister_download, _running
+    
+    success = []
+    failed = []
+    
+    for task_id in body.ids:
+        try:
+            task = get_task(task_id)
+            if not task:
+                failed.append({"id": task_id, "reason": "任务不存在"})
+                continue
+            
+            # 停止进程
+            proc = running_procs.get(task_id)
+            if proc:
+                proc.terminate()
+                running_procs.pop(task_id, None)
+            if qm_is_running(task_id):
+                proc = _running.get(task_id)
+                if proc:
+                    proc.terminate()
+                unregister_download(task_id)
+            
+            update_task(task_id, status="stopped", stage="stopped")
+            success.append(task_id)
+        except Exception as e:
+            failed.append({"id": task_id, "reason": str(e)})
+    
+    try_start_next()
+    return {
+        "message": f"成功 {len(success)} 个，失败 {len(failed)} 个",
+        "success": success,
+        "failed": failed
+    }
+
+
+@router.post("/api/tasks/batch/retry")
+def batch_retry_tasks(body: BatchTaskRequest):
+    """批量重试失败任务"""
+    success = []
+    failed = []
+    
+    for task_id in body.ids:
+        try:
+            task = get_task(task_id)
+            if not task:
+                failed.append({"id": task_id, "reason": "任务不存在"})
+                continue
+            
+            # 停止可能存在的进程
+            proc = running_procs.get(task_id)
+            if proc:
+                proc.terminate()
+                running_procs.pop(task_id, None)
+            from app.services.queue import is_downloading as qm_is_running, unregister_download
+            if qm_is_running(task_id):
+                unregister_download(task_id)
+            
+            reset_task_for_manual_retry(task_id)
+            success.append(task_id)
+        except Exception as e:
+            failed.append({"id": task_id, "reason": str(e)})
+    
+    try_start_next()
+    return {
+        "message": f"成功 {len(success)} 个，失败 {len(failed)} 个",
+        "success": success,
+        "failed": failed
+    }
+
+
+@router.delete("/api/tasks/batch/delete")
+def batch_delete_tasks(body: BatchTaskRequest):
+    """批量删除任务"""
+    from app.services.queue import is_downloading as qm_is_running, unregister_download, _running
+    
+    success = []
+    failed = []
+    
+    for task_id in body.ids:
+        try:
+            # 停止进程
+            proc = running_procs.get(task_id)
+            if proc:
+                proc.terminate()
+                running_procs.pop(task_id, None)
+            if qm_is_running(task_id):
+                proc = _running.get(task_id)
+                if proc:
+                    proc.terminate()
+                unregister_download(task_id)
+            
+            # 清理文件
+            task_dir = get_task_dir(task_id)
+            if task_dir.exists():
+                shutil.rmtree(task_dir)
+            flat_mp4 = Path(get_download_config().get("download_dir", "")) / f"{task_id}.mp4"
+            if flat_mp4.exists():
+                flat_mp4.unlink()
+            cfg = get_download_config()
+            temp_dir = cfg.get("temp_dir", "")
+            if temp_dir:
+                import glob
+                for f in glob.glob(f"{temp_dir}/{task_id}*"):
+                    try:
+                        p = Path(f)
+                        if p.is_file():
+                            p.unlink()
+                    except Exception:
+                        pass
+            log_path = get_task_log_path(task_id)
+            if log_path.exists():
+                log_path.unlink()
+            
+            delete_task(task_id)
+            success.append(task_id)
+        except Exception as e:
+            failed.append({"id": task_id, "reason": str(e)})
+    
+    return {
+        "message": f"成功 {len(success)} 个，失败 {len(failed)} 个",
+        "success": success,
+        "failed": failed
+    }
 
 
 @router.get("/api/tasks/{task_id}")
@@ -247,20 +550,67 @@ async def task_logs(task_id: str):
     log_path = get_task_log_path(task_id)
 
     async def event_generator():
+        # 等待日志文件创建（最多等待 30 秒）
+        wait_count = 0
+        while not log_path.exists() and wait_count < 60:
+            await asyncio.sleep(0.5)
+            wait_count += 1
+        
         if not log_path.exists():
-            yield "data: log not found\n\n"
+            yield "data: 日志文件不存在（任务可能尚未开始下载）\n\n"
             return
+        
+        # 打开日志文件，从末尾开始监听
         with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
-            f.seek(0, 2)
+            f.seek(0, 2)  # 跳到文件末尾
             while True:
                 line = f.readline()
                 if not line:
                     await asyncio.sleep(0.5)
+                    # 检查文件是否被删除
+                    if not log_path.exists():
+                        yield "data: [日志文件已清理]\n\n"
+                        break
                     continue
-                yield f"data: {line.strip()}\n\n"
+                yield f"data: {line.rstrip()}\n\n"
 
-    return StreamingResponse(event_generator(),
-                             media_type="text/event-stream")
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.get("/api/tasks/{task_id}/logs/history")
+def task_logs_history(task_id: str, page: int = 1, page_size: int = 100, search: str = ""):
+    """获取任务历史日志（分页）"""
+    log_path = get_task_log_path(task_id)
+    if not log_path.exists():
+        return {"list": [], "total": 0, "page": page, "page_size": page_size}
+    
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+    except:
+        return {"list": [], "total": 0, "page": page, "page_size": page_size}
+    
+    # 反转：最新的在前面；过滤空行
+    lines = [l.rstrip() for l in reversed(lines) if l.strip()]
+    
+    # 搜索过滤
+    if search:
+        lines = [l for l in lines if search.lower() in l.lower()]
+    
+    total = len(lines)
+    # 页码越界保护
+    max_page = max(1, (total + page_size - 1) // page_size)
+    if page > max_page:
+        page = max_page
+    start = (page - 1) * page_size
+    end = start + page_size
+    
+    return {
+        "list": lines[start:end],
+        "total": total,
+        "page": page,
+        "page_size": page_size
+    }
 
 
 @router.post("/api/start-waiting")
@@ -290,3 +640,4 @@ def update_task_info(task_id: str, body: dict):
 
     update_task(task_id, **updates)
     return {"message": "Updated", "data": get_task(task_id)}
+

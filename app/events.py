@@ -44,16 +44,18 @@ async def broadcast_worker():
     global _dirty
     from app.db.database import list_tasks
 
+    loop = asyncio.get_event_loop()
+
     while True:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(2)
 
         with _dirty_lock:
             if not _dirty:
                 continue
             _dirty = False
 
-        # 获取完整任务列表（去掉 m3u8_url 减小体积）
-        tasks = list_tasks()
+        # 在线程池中执行同步 DB 查询，避免阻塞事件循环
+        tasks = await loop.run_in_executor(None, list_tasks)
         for t in tasks:
             t.pop("m3u8_url", None)
 

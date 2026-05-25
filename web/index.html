@@ -7,58 +7,48 @@
   <title>DL Manager</title>
   <link rel="stylesheet" href="style.css">
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-  
+  <script src="components/SourcesView.js"></script>
+  <script src="components/SettingsView.js"></script>
+  <script src="components/LogsView.js"></script>
 </head>
 <body>
 <div id="app" v-cloak>
   <div class="header">
     <h1>🎬 DL Manager</h1>
     <div class="actions">
-      <button class="btn" @click="showAddModal=true" style="border-color:#ff6b9d;color:#ff6b9d;">➕ 添加视频</button>
-      <button class="btn" @click="tab='tasks'">📋 任务</button>
-      <button class="btn" @click="tab='sources'">📡 订阅源</button>
-      <button class="btn" @click="tab='settings'">⚙ 设置</button>
+      <button class="btn" :class="{active: tab==='tasks'}" @click="tab='tasks'">📋 任务</button>
+      <button class="btn" :class="{active: tab==='sources'}" @click="tab='sources'">📡 订阅源</button>
+      <button class="btn" :class="{active: tab==='logs'}" @click="tab='logs'">📜 日志</button>
+      <button class="btn" :class="{active: tab==='settings'}" @click="tab='settings'">⚙ 设置</button>
     </div>
   </div>
   <div class="msg" v-if="pollMsg">[[ pollMsg ]]</div>
 
   <!-- 任务列表 -->
   <div v-if="tab==='tasks'">
-    <div class="header" style="padding:0;border:none;margin-bottom:12px;">
-      <div class="stat-row" style="margin:0;">
+    <!-- 状态栏 + 操作按钮 -->
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+      <div class="stat-row" style="margin:0;flex:1;gap:32px;">
         <div class="stat active"><div class="val">[[ activeCount ]]</div><div class="lbl">进行中</div></div>
         <div class="stat done"><div class="val">[[ completedCount ]]</div><div class="lbl">已完成</div></div>
         <div class="stat fail"><div class="val">[[ failedCount ]]</div><div class="lbl">失败</div></div>
         <div class="stat"><div class="val">[[ waitingCount ]]</div><div class="lbl">等待中</div></div>
-      <div class="stat speed" style="margin-left:12px;"><div class="val" style="font-size:28px;color:#4ade80;">[[ totalSpeed.toFixed(1) ]]</div><div class="lbl">总速度 MB/s</div></div>
+        <div style="width:2px;height:32px;background:#333;margin:0 12px;"></div>
+        <div class="stat speed"><div class="val" style="font-size:28px;color:#4ade80;">[[ totalSpeed.toFixed(1) ]]</div><div class="lbl">总速度 MB/s</div></div>
+        <div class="stat" v-if="systemStats" style="border-color:#60a5fa;color:#60a5fa;">
+          <div class="val" style="font-size:28px;">[[ systemStats.cpu.percent ]]%</div>
+          <div class="lbl">CPU</div>
+        </div>
+        <div class="stat" v-if="systemStats" style="border-color:#fbbf24;color:#fbbf24;">
+          <div class="val" style="font-size:28px;">[[ systemStats.memory.percent ]]%</div>
+          <div class="lbl">内存</div>
+        </div>
       </div>
-      <div class="batch-bar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-        <label style="cursor:pointer;display:flex;align-items:center;gap:4px;font-size:13px;color:#aaa;">
-          <input type="checkbox" :checked="allSelected" @change="toggleSelectAll"> 全选
-        </label>
-        <span style="color:#888;font-size:12px;" v-if="selectedCount">已选 [[ selectedCount ]] 项</span>
-        <button class="btn sm" @click="batchStart" :disabled="!canBatchStart" style="border-color:#4ade80;color:#4ade80;">▶ 批量开始</button>
-        <button class="btn sm" @click="batchStop" :disabled="!canBatchStop" style="border-color:#fbbf24;color:#fbbf24;">⏸ 批量暂停</button>
-        <button class="btn sm" @click="batchRetry" :disabled="!canBatchRetry" style="border-color:#4ade80;color:#4ade80;">🔄 批量重试</button>
-        <button class="btn sm danger" @click="batchDelete" :disabled="!selectedCount" style="border-color:#f87171;color:#f87171;">🗑 批量删除</button>
-        <span style="flex:1"></span>
-        <button class="btn" @click="showPollModal=true" :disabled="!sources.length"> [[ polling ? '轮询中...' : '刷新订阅' ]]</button>
-        <button class="btn sm" @click="toggleViewMode" style="border-color:#888;color:#aaa;font-size:16px;" :title="viewMode==='grid' ? '切换列表' : '切换卡片'">[[ viewMode==='grid' ? '☰' : '▦' ]]</button>
-      </div>
+      <button class="btn" @click="showAddModal=true" style="border-color:#ff6b9d;color:#ff6b9d;">➕ 添加视频</button>
+      <button class="btn" @click="showPollModal=true" :disabled="!sources.length">[[ polling ? '轮询中...' : '刷新订阅' ]]</button>
     </div>
 
-    <!-- 搜索 + 排序 -->
-    <div class="search-sort-bar">
-      <input class="search-input" type="text" placeholder="🔍 搜索任务名称或 ID..." v-model="searchQuery" @input="onSearchChange">
-      <select class="sort-select" v-model="sortBy">
-        <option value="default">默认排序</option>
-        <option value="created_desc">创建时间 ↓</option>
-        <option value="created_asc">创建时间 ↑</option>
-        <option value="name">名称 A-Z</option>
-        <option value="status">按状态</option>
-      </select>
-    </div>
-
+    <!-- 状态筛选 + 搜索框 -->
     <div class="filter-bar">
       <button class="filter-btn" :class="{active: filter==null}" @click="filter=null">全部</button>
       <button class="filter-btn" :class="{active: filter=='waiting'}" @click="filter='waiting'">等待([[ waitingCount ]])</button>
@@ -68,6 +58,29 @@
       <button class="filter-btn" :class="{active: filter=='completed'}" @click="filter='completed'">已完成([[ completedCount ]])</button>
       <button class="filter-btn" :class="{active: filter=='failed'}" @click="filter='failed'">失败([[ failedCount ]])</button>
       <button class="filter-btn" :class="{active: filter=='stopped'}" @click="filter='stopped'">已暂停([[ stoppedCount ]])</button>
+      <input class="search-input" type="text" placeholder="🔍 搜索任务名称或 ID..." v-model="searchQuery" @input="onSearchChange" style="flex:0 0 600px;margin-left:auto;">
+    </div>
+
+    <!-- 批量操作栏 -->
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid #333;margin-bottom:12px;">
+      <label style="cursor:pointer;display:flex;align-items:center;gap:4px;font-size:13px;color:#aaa;">
+        <input type="checkbox" :checked="allSelected" @change="toggleSelectAll"> 全选
+      </label>
+      <span style="color:#888;font-size:12px;" v-if="selectedCount">已选 [[ selectedCount ]] 项</span>
+      <button class="btn sm" @click="batchStart" :disabled="!canBatchStart || batchLoading" style="border-color:#4ade80;color:#4ade80;">▶ 批量开始</button>
+      <button class="btn sm" @click="batchStop" :disabled="!canBatchStop || batchLoading" style="border-color:#fbbf24;color:#fbbf24;">⏸ 批量暂停</button>
+      <button class="btn sm" @click="batchRetry" :disabled="!canBatchRetry || batchLoading" style="border-color:#4ade80;color:#4ade80;"> 批量重试</button>
+      <button class="btn sm danger" @click="batchDelete" :disabled="!selectedCount || batchLoading" style="border-color:#f87171;color:#f87171;">🗑 批量删除</button>
+      <span v-if="batchLoading" style="color:#888;font-size:12px;">处理中...</span>
+      <span style="flex:1"></span>
+      <select class="sort-select" v-model="sortBy" style="margin-right:8px;">
+        <option value="default">默认排序</option>
+        <option value="created_desc">创建时间 ↓</option>
+        <option value="created_asc">创建时间 ↑</option>
+        <option value="name">名称 A-Z</option>
+        <option value="status">按状态</option>
+      </select>
+      <button class="btn sm" @click="toggleViewMode" style="border-color:#888;color:#aaa;font-size:16px;" :title="viewMode==='grid' ? '切换列表' : '切换卡片'">[[ viewMode==='grid' ? '☷' : '' ]]</button>
     </div>
 
     <div class="task-grid" v-if="viewMode==='grid' && filteredTasks.length">
@@ -157,119 +170,42 @@
 
   <!-- 订阅源管理 -->
   <div v-if="tab==='sources'">
-    <div style="display:flex;align-items:center;margin-bottom:16px;">
-      <button class="btn" @click="tab='tasks'" style="margin-right:12px;">← 返回</button>
-      <h2 style="font-size:16px;color:#ff6b9d;margin:0;">📡 订阅源管理</h2>
-    </div>
+    <sources-view
+      :sources="sources"
+      :new-source="newSource"
+      :editing-source="editingSource"
+      @add-source="addSource"
+      @toggle-source="toggleSource"
+      @poll-source="pollSource"
+      @edit-source="editSource"
+      @del-source="delSource"
+      @save-source="saveSource"
+      @update:new-source="v => newSource = v"
+      @update:editing-source="v => editingSource = v">
+    </sources-view>
+  </div>
 
-    <!-- 添加订阅源 -->
-    <div class="add-source-form">
-      <div class="row">
-        <input v-model="newSource.name" placeholder="订阅源名称">
-        <input v-model="newSource.url" placeholder="列表页 URL，如：https://example.com/list">
-        <select v-model="newSource.feed_type">
-          <option value="webpage">网页解析</option>
-          <option value="rss">标准 RSS</option>
-        </select>
-      </div>
-      <div class="row" style="margin-top:6px;">
-        <input v-model="newSource.poll_cron" placeholder="定时轮询 cron，默认 0 */8 * * *（每8小时）" style="flex:2;">
-        <input v-model="newSource.page_url_pattern" placeholder="视频链接正则，如：href=&quot;(https://example.com/videos/[^&quot;]+)&quot;" style="flex:3;">
-        <button class="btn primary" @click="addSource">添加</button>
-      </div>
-      <div style="color:#666;font-size:12px;margin-top:4px;">
-        💡 必填：名称、列表页 URL、视频链接正则。其余字段（标题/m3u8/AES提取规则）可在编辑中设置，不填则使用通用规则自动识别。
-      </div>
-    </div>
-
-    <!-- 订阅源列表 -->
-    <div class="sources-header">
-      <span style="color:#888;font-size:13px;">共 [[ sources.length ]] 个订阅源</span>
-    </div>
-    <div class="source-list" v-if="sources.length">
-      <div class="source-card" v-for="s in sources" :key="s.id">
-        <div class="info">
-          <div class="name">[[ s.name ]] <span class="feed-type">[[ s.feed_type ]]</span></div>
-          <div class="url">[[ s.url ]]</div>
-          <div style="color:#888;font-size:12px;margin-top:2px;">⏰ [[ s.poll_cron || '0 */8 * * *' ]]</div>
-        </div>
-        <div class="actions">
-          <button class="toggle" :class="{on: s.enabled}" @click="toggleSource(s)"></button>
-          <button class="btn sm" @click="pollSource(s)">🔄 轮询</button>
-          <button class="btn sm" @click="editSource(s)">✏️ 编辑</button>
-          <button class="btn danger sm" @click="delSource(s.id)">🗑 删除</button>
-        </div>
-      </div>
-    </div>
-    <div class="empty" v-if="!sources.length">暂无订阅源，请添加</div>
+  <!-- 系统日志 -->
+  <div v-if="tab==='logs'">
+    <logs-view :system-logs="systemLogs" @clear-logs="clearSystemLogs"></logs-view>
   </div>
 
   <!-- 设置 -->
   <div v-if="tab==='settings'">
-    <div style="display:flex;align-items:center;margin-bottom:16px;">
-      <button class="btn" @click="tab='tasks'" style="margin-right:12px;">← 返回</button>
-      <h2 style="font-size:16px;color:#ff6b9d;margin:0;">⚙ 下载设置</h2>
-    </div>
-
-    <!-- 下载配置 -->
-    <div class="scheduler-config">
-      <div class="item">
-        <label>下载目录</label>
-        <input v-model="downloadConfig.download_dir" placeholder="/home/zhegcheg/imovie/tasks" style="width:300px;">
-      </div>
-      <div class="item">
-        <label>临时目录 <span style="color:#888;font-size:12px;">(分片下载后合并，再移动到下载目录)</span></label>
-        <input v-model="downloadConfig.temp_dir" placeholder="/home/zhegcheg/imovie/temp" style="width:300px;">
-      </div>
-      <div class="item">
-        <label>最大并发数 <span style="color:#888;font-size:12px;">(上限10)</span></label>
-        <input v-model="downloadConfig.max_concurrent" placeholder="2" type="number" min="1" max="10" style="width:80px;">
-      </div>
-      <div class="item">
-        <label>每任务线程数 <span style="color:#888;font-size:12px;">(上限16)</span></label>
-        <input v-model="downloadConfig.thread_count" placeholder="8" type="number" min="1" max="16" style="width:80px;">
-      </div>
-      <div class="item">
-        <label>NAS 目标 <span style="color:#888;font-size:12px;">(下载完成后自动复制到 NAS)</span></label>
-        <div style="display:flex;align-items:center;gap:12px;">
-          <div style="font-size:12px;color:#888;">/mnt/fn-nas-imovie/</div>
-          <button class="toggle" :class="{on: downloadConfig.move_to_nas==='true'}" @click="downloadConfig.move_to_nas = downloadConfig.move_to_nas==='true' ? 'false' : 'true'"></button>
-          <span style="font-size:12px;" :style="{color: downloadConfig.move_to_nas==='true' ? '#4ade80' : '#888'}">[[ downloadConfig.move_to_nas==='true' ? '已启用' : '已关闭' ]]</span>
-        </div>
-      </div>
-      <div class="item" style="margin-top:8px;">
-        <button class="btn primary" @click="saveDownloadConfig" :disabled="configSaving">💾 [[ configSaving ? '保存中...' : '保存设置' ]]</button>
-        <span style="color:#4ade80;font-size:13px;margin-left:12px;font-weight:500;" v-if="configSaved">✅ [[ configSaved ]]</span>
-      </div>
-    </div>
-
-    <!-- 代理设置 -->
-    <div class="scheduler-config">
-      <h3 style="font-size:14px;color:#ff6b9d;margin-bottom:12px;">🌐 代理设置</h3>
-      <div class="item">
-        <label>启用代理</label>
-        <button class="toggle" :class="{on: proxyConfig.enabled==='true'}" @click="proxyConfig.enabled = proxyConfig.enabled==='true' ? 'false' : 'true'"></button>
-      </div>
-      <div class="item">
-        <label>代理类型</label>
-        <select v-model="proxyConfig.type" style="background:#0f0f0f;border:1px solid #333;border-radius:8px;padding:8px 12px;color:#fff;font-size:13px;width:120px;">
-          <option value="http">HTTP</option>
-          <option value="socks5">SOCKS5</option>
-        </select>
-      </div>
-      <div class="item">
-        <label>主机地址</label>
-        <input v-model="proxyConfig.host" placeholder="127.0.0.1" style="width:160px;">
-      </div>
-      <div class="item">
-        <label>端口号</label>
-        <input v-model="proxyConfig.port" placeholder="7890" type="number" min="1" max="65535" style="width:100px;">
-      </div>
-      <div class="item" style="margin-top:8px;">
-        <button class="btn" @click="saveProxyConfig" :disabled="proxySaving">💾 [[ proxySaving ? '保存中...' : '保存代理' ]]</button>
-        <span style="color:#4ade80;font-size:13px;margin-left:12px;font-weight:500;" v-if="proxySaved">✅ [[ proxySaved ]]</span>
-      </div>
-    </div>
+    <settings-view
+      :download-config="downloadConfig"
+      :proxy-config="proxyConfig"
+      :log-config="logConfig"
+      :config-saving="configSaving"
+      :config-saved="configSaved"
+      :proxy-saving="proxySaving"
+      :proxy-saved="proxySaved"
+      :log-saving="logSaving"
+      :log-saved="logSaved"
+      @save-download-config="saveDownloadConfig"
+      @save-proxy-config="saveProxyConfig"
+      @save-log-config="saveLogConfig">
+    </settings-view>
   </div>
 
   <!-- 删除确认弹窗 -->
@@ -440,54 +376,83 @@
         <h2>任务详情</h2>
         <button class="panel-close" @click="closeDetail">×</button>
       </div>
-      <div class="panel-body detail-body">
-        <div class="detail-row">
-          <span class="detail-label">任务 ID</span>
-          <span class="detail-val mono">[[ detailModal.id ]]</span>
-        </div>
-        <div class="detail-row">
-          <span class="detail-label">名称</span>
-          <span class="detail-val">[[ detailModal.name ]]</span>
-        </div>
-        <div class="detail-row">
-          <span class="detail-label">状态</span>
-          <span class="detail-val">
-            <span class="stage" :class="detailModal.stage">[[ stageLabel(detailModal.stage) ]]</span>
-            <span v-if="detailModal.progress"> [[ Math.round(detailModal.progress) ]]%</span>
-          </span>
-        </div>
-        <div class="detail-row">
-          <span class="detail-label">创建时间</span>
-          <span class="detail-val">[[ detailModal.created_at ? relativeTime(detailModal.created_at) : '-' ]]</span>
-        </div>
-        <div class="detail-row">
-          <span class="detail-label">完成时间</span>
-          <span class="detail-val">[[ detailModal.completed_at ? relativeTime(detailModal.completed_at) : '-' ]]</span>
-        </div>
-        <div class="detail-row" v-if="detailModal.file">
-          <span class="detail-label">下载文件</span>
-          <span class="detail-val path">[[ detailModal.file ]]</span>
-        </div>
-        <div class="detail-row" v-if="detailModal.final_path">
-          <span class="detail-label">转存路径</span>
-          <span class="detail-val path">[[ detailModal.final_path ]]</span>
-        </div>
-        <div class="detail-row" v-if="detailModal.error">
-          <span class="detail-label">错误信息</span>
-          <span class="detail-val err">[[ detailModal.error ]]</span>
-        </div>
-        <div class="detail-row" v-if="detailModal.speed">
-          <span class="detail-label">下载速度</span>
-          <span class="detail-val">[[ detailModal.speed ]]</span>
-        </div>
-        <div class="detail-row" v-if="detailModal.retry_count > 0">
-          <span class="detail-label">重试次数</span>
-          <span class="detail-val">[[ detailModal.retry_count ]]/3</span>
+      <!-- Tab 切换：基本信息 / 历史日志 -->
+      <div class="detail-tabs">
+        <button class="detail-tab" :class="{active: detailTab==='info'}" @click="detailTab='info'">📝 基本信息</button>
+        <button class="detail-tab" :class="{active: detailTab==='log'}" @click="detailTab='log'">📜 历史日志</button>
+      </div>
+      <!-- 基本信息 -->
+      <div v-if="detailTab==='info'">
+        <div class="panel-body detail-body">
+          <div class="detail-row">
+            <span class="detail-label">任务 ID</span>
+            <span class="detail-val mono">[[ detailModal.id ]]</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">名称</span>
+            <span class="detail-val">[[ detailModal.name ]]</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">状态</span>
+            <span class="detail-val">
+              <span class="stage" :class="detailModal.stage">[[ stageLabel(detailModal.stage) ]]</span>
+              <span v-if="detailModal.progress"> [[ Math.round(detailModal.progress) ]]%</span>
+            </span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">创建时间</span>
+            <span class="detail-val">[[ detailModal.created_at ? relativeTime(detailModal.created_at) : '-' ]]</span>
+          </div>
+          <div class="detail-row">
+            <span class="detail-label">完成时间</span>
+            <span class="detail-val">[[ detailModal.completed_at ? relativeTime(detailModal.completed_at) : '-' ]]</span>
+          </div>
+          <div class="detail-row" v-if="detailModal.file">
+            <span class="detail-label">下载文件</span>
+            <span class="detail-val path">[[ detailModal.file ]]</span>
+          </div>
+          <div class="detail-row" v-if="detailModal.final_path">
+            <span class="detail-label">转存路径</span>
+            <span class="detail-val path">[[ detailModal.final_path ]]</span>
+          </div>
+          <div class="detail-row" v-if="detailModal.error">
+            <span class="detail-label">错误信息</span>
+            <span class="detail-val err">[[ detailModal.error ]]</span>
+          </div>
+          <div class="detail-row" v-if="detailModal.speed">
+            <span class="detail-label">下载速度</span>
+            <span class="detail-val">[[ detailModal.speed ]]</span>
+          </div>
+          <div class="detail-row" v-if="detailModal.retry_count > 0">
+            <span class="detail-label">重试次数</span>
+            <span class="detail-val">[[ detailModal.retry_count ]]/3</span>
+          </div>
         </div>
       </div>
-      <!-- 实时日志区域 -->
-      <div class="detail-log-header">📝 实时日志</div>
-      <div class="log-box detail-log" ref="logBox" v-text="logContent || '等待日志...'"></div>
+      <!-- 历史日志 -->
+      <div v-if="detailTab==='log'" class="history-log-container">
+        <!-- 级别筛选 + 搜索 -->
+        <div style="padding:10px 16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;border-bottom:1px solid #333;">
+          <div style="display:flex;gap:4px;">
+            <button class="btn sm" :style="historyLogLevel==='all' ? 'background:#ff6b9d;color:#fff;border-color:#ff6b9d;' : 'border-color:#333;color:#888;'" @click="historyLogLevel='all'; historyLogPage=1; loadHistoryLog()">全部</button>
+            <button class="btn sm" :style="historyLogLevel==='error' ? 'background:#f87171;color:#fff;border-color:#f87171;' : 'border-color:#333;color:#888;'" @click="historyLogLevel='error'; historyLogPage=1; loadHistoryLog()">ERROR</button>
+            <button class="btn sm" :style="historyLogLevel==='warn' ? 'background:#fbbf24;color:#fff;border-color:#fbbf24;' : 'border-color:#333;color:#888;'" @click="historyLogLevel='warn'; historyLogPage=1; loadHistoryLog()">WARN</button>
+            <button class="btn sm" :style="historyLogLevel==='info' ? 'background:#4ade80;color:#fff;border-color:#4ade80;' : 'border-color:#333;color:#888;'" @click="historyLogLevel='info'; historyLogPage=1; loadHistoryLog()">INFO</button>
+            <button class="btn sm" :style="historyLogLevel==='debug' ? 'background:#60a5fa;color:#fff;border-color:#60a5fa;' : 'border-color:#333;color:#888;'" @click="historyLogLevel='debug'; historyLogPage=1; loadHistoryLog()">DEBUG</button>
+          </div>
+          <input v-model="historyLogSearch" placeholder="🔍 搜索日志..." style="flex:1;min-width:120px;background:#0f0f0f;border:1px solid #333;border-radius:6px;padding:6px 10px;color:#fff;font-size:12px;" @input="historyLogPage=1; loadHistoryLog()">
+          <span style="color:#888;font-size:11px;">共 [[ historyLogTotal ]] 条</span>
+        </div>
+        <div class="log-box" style="max-height:50vh;font-family:'Courier New',monospace;">
+          <div v-for="(line, i) in filteredHistoryLogLines" :key="i" :class="getLogLineClass(line)" style="padding:2px 0;font-size:12px;line-height:1.6;white-space:pre-wrap;">[[ line ]]</div>
+          <div v-if="!filteredHistoryLogLines.length" style="color:#666;text-align:center;padding:24px;">暂无日志</div>
+        </div>
+        <div v-if="historyLogTotal > historyLogPageSize" style="padding:8px 16px;display:flex;gap:6px;justify-content:center;border-top:1px solid #333;">
+          <button class="btn sm" :disabled="historyLogPage <= 1" @click="historyLogPage--; loadHistoryLog()">← 上一页</button>
+          <span style="color:#888;font-size:11px;line-height:28px;">[[ historyLogPage ]] / [[ Math.ceil(historyLogTotal / historyLogPageSize) ]]</span>
+          <button class="btn sm" :disabled="historyLogPage >= Math.ceil(historyLogTotal / historyLogPageSize)" @click="historyLogPage++; loadHistoryLog()">下一页 →</button>
+        </div>
+      </div>
       <div class="panel-footer">
         <button v-if="detailModal.stage === 'waiting' || detailModal.stage === 'stopped'" class="btn" style="border-color:#60a5fa;color:#60a5fa;" @click="startTask(detailModal)">▶ 开始</button>
         <button v-if="detailModal.stage === 'failed'" class="btn" style="border-color:#4ade80;color:#4ade80;" @click="retryTask(detailModal)">🔄 重试</button>
@@ -497,18 +462,11 @@
     </div>
   </div>
 
-  <!-- 日志弹窗 -->
-  <div class="overlay" v-if="detailTask" @click.self="closeLog">
-    <div class="log-panel">
-      <div class="panel-header">
-        <h2 v-if="detailTask" v-text="detailTask.id + ' — ' + stageLabel(detailTask.stage)"></h2>
-        <button class="panel-close" @click="closeLog">×</button>
-      </div>
-      <div class="log-box" ref="logBox" v-text="logContent || '等待日志...'"></div>
-    </div>
-  </div>
+
 </div>
 
+  <script src="components/SourcesView.js"></script>
+  <script src="components/SettingsView.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

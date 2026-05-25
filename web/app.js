@@ -2,20 +2,27 @@ const { createApp, ref, computed, onMounted, onUnmounted, nextTick } = Vue
 
 createApp({
   delimiters: ['[[', ']]'],
+  components: {
+    'sources-view': SourcesView,
+    'settings-view': SettingsView,
+    'logs-view': LogsView
+  },
   setup() {
     const tasks = ref([])
     const sources = ref([])
     const filter = ref(null)
     const tab = ref('tasks')
-    const detailTask = ref(null)
-    const logContent = ref('')
-    const logBox = ref(null)
+    const detailTask = ref(null)  // legacy, kept for backward compatibility
     const pollMsg = ref('')
     const polling = ref(false)
     const starting = ref(false)
+    const batchLoading = ref(false)  // 批量操作加载状态
     const schedulerConfig = ref({rss_cron: '0 4 * * *', rss_enabled: 'true'})
     const downloadConfig = ref({download_dir: '', temp_dir: '', max_concurrent: '2', thread_count: '8', move_to_nas: 'true'})
-    const proxyConfig = ref({enabled: 'false', type: 'http', host: '', port: '7890'})
+    const proxyConfig = ref({enabled: 'false', type: 'http', host: '', port: '7890', username: '', password: ''})
+    const logConfig = ref({log_level: 'INFO', log_path: ''})
+    const logSaving = ref(false)
+    const logSaved = ref('')
     const newSource = ref({name:'', url:'', feed_type: 'webpage', poll_cron: '0 */8 * * *'})
     const deleteTarget = ref(null)
     const editingSource = ref(null)
@@ -37,8 +44,14 @@ createApp({
     const sortBy = ref('default')  // default | created_asc | created_desc | name | status
     const detailModal = ref(null)   // task object for detail modal
     let pollTimer = null
-    let logSource = null
     let taskSource = null
+    let systemStatsSource = null
+    let systemLogsSource = null
+
+    // 系统资源状态（CPU/内存）
+    const systemStats = ref(null)
+    // 系统日志
+    const systemLogs = ref([])
 
     const counts = computed(() => {
       let a=0,c=0,f=0,w=0,s=0,d=0,m=0,mv=0
@@ -66,10 +79,10 @@ createApp({
       for (const t of tasks.value) {
         if (t.stage === 'downloading' && t.speed) {
           const s = t.speed.trim()
-          // 支持 MB/s, KB/s, GB/s, B/s (yt-dlp 格式) 和 MBps, KBps (旧格式)
-          if (s.endsWith('MB/s') || s.endsWith('MBps')) total += parseFloat(s) || 0
-          else if (s.endsWith('KB/s') || s.endsWith('KBps')) total += (parseFloat(s) || 0) / 1024
-          else if (s.endsWith('GB/s') || s.endsWith('GBps')) total += (parseFloat(s) || 0) * 1024
+          // 支持 MB/s, KB/s, GB/s, B/s (yt-dlp) 和 MiB/s, KiB/s (二进制) 以及 MBps, KBps (旧格式)
+          if (s.endsWith('MB/s') || s.endsWith('MBps') || s.endsWith('MiB/s')) total += parseFloat(s) || 0
+          else if (s.endsWith('KB/s') || s.endsWith('KBps') || s.endsWith('KiB/s')) total += (parseFloat(s) || 0) / 1024
+          else if (s.endsWith('GB/s') || s.endsWith('GBps') || s.endsWith('GiB/s')) total += (parseFloat(s) || 0) * 1024
         }
       }
       return total
@@ -166,19 +179,41 @@ createApp({
       }
     }
     async function batchStart() {
-      const ids = [...selected.value]
-      for (const tid of ids) {
-        try { await fetch(`/api/tasks/${tid}/start`, {method:'POST'}) } catch(e) {}
+      if (batchLoading.value) return
+      if (selected.value.length === 0) return
+      batchLoading.value = true
+      try {
+        const res = await fetch('/api/tasks/batch/start', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ids: selected.value})
+        })
+        const data = await res.json()
+        console.log('批量开始:', data)
+      } catch(e) {
+        console.error('批量开始失败:', e)
       }
       selected.value = []
+      batchLoading.value = false
       await fetchTasks()
     }
     async function batchStop() {
-      const ids = [...selected.value]
-      for (const tid of ids) {
-        try { await fetch(`/api/tasks/${tid}/stop`, {method:'POST'}) } catch(e) {}
+      if (batchLoading.value) return
+      if (selected.value.length === 0) return
+      batchLoading.value = true
+      try {
+        const res = await fetch('/api/tasks/batch/stop', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ids: selected.value})
+        })
+        const data = await res.json()
+        console.log('批量暂停:', data)
+      } catch(e) {
+        console.error('批量暂停失败:', e)
       }
       selected.value = []
+      batchLoading.value = false
       await fetchTasks()
     }
     function toggleViewMode() {
@@ -186,20 +221,41 @@ createApp({
       localStorage.setItem('dl_view_mode', viewMode.value)
     }
     async function batchRetry() {
-      const ids = [...selected.value]
-      for (const tid of ids) {
-        try { await fetch(`/api/tasks/${tid}/retry`, {method:'POST'}) } catch(e) {}
+      if (batchLoading.value) return
+      if (selected.value.length === 0) return
+      batchLoading.value = true
+      try {
+        const res = await fetch('/api/tasks/batch/retry', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ids: selected.value})
+        })
+        const data = await res.json()
+        console.log('批量重试:', data)
+      } catch(e) {
+        console.error('批量重试失败:', e)
       }
       selected.value = []
+      batchLoading.value = false
       await fetchTasks()
     }
     async function batchDelete() {
+      if (batchLoading.value) return
       if (!confirm(`确定要删除选中的 ${selectedCount.value} 个任务？`)) return
-      const ids = [...selected.value]
-      for (const tid of ids) {
-        try { await fetch(`/api/tasks/${tid}`, {method:'DELETE'}) } catch(e) {}
+      batchLoading.value = true
+      try {
+        const res = await fetch('/api/tasks/batch/delete', {
+          method: 'DELETE',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ids: selected.value})
+        })
+        const data = await res.json()
+        console.log('批量删除:', data)
+      } catch(e) {
+        console.error('批量删除失败:', e)
       }
       selected.value = []
+      batchLoading.value = false
       await fetchTasks()
     }
 
@@ -222,7 +278,8 @@ createApp({
         const data = d.data || {}
         schedulerConfig.value = {rss_cron: data.rss_cron || '0 4 * * *', rss_enabled: data.rss_enabled || 'true'}
         downloadConfig.value = {download_dir: data.download_dir || '', temp_dir: data.temp_dir || '', max_concurrent: data.max_concurrent || '2', thread_count: data.thread_count || '8', move_to_nas: data.move_to_nas || 'true'}
-        proxyConfig.value = {enabled: data.enabled || 'false', type: data.type || 'http', host: data.host || '', port: data.port || '7890'}
+        proxyConfig.value = {enabled: data.enabled || 'false', type: data.type || 'http', host: data.host || '', port: data.port || '7890', username: data.username || '', password: data.password || ''}
+        logConfig.value = {log_level: data.log_level || 'INFO', log_path: data.log_path || ''}
       } catch(e) {}
     }
 
@@ -243,6 +300,25 @@ createApp({
         console.error(e)
       }
       proxySaving.value = false
+    }
+
+    async function saveLogConfig() {
+      logSaving.value = true
+      logSaved.value = ''
+      try {
+        const r = await fetch('/api/log-config', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(logConfig.value)
+        })
+        const d = await r.json()
+        logSaved.value = d.message || '已保存'
+        setTimeout(() => logSaved.value = '', 3000)
+      } catch(e) {
+        alert('保存日志设置失败: ' + (e.message || e))
+        console.error(e)
+      }
+      logSaving.value = false
     }
 
     async function startAll() {
@@ -426,40 +502,62 @@ createApp({
     // 搜索改变时回到第一页
     function onSearchChange() { page.value = 1 }
 
+        // 历史日志相关
+    const detailTab = ref('info')
+    const historyLogLines = ref([])
+    const historyLogTotal = ref(0)
+    const historyLogPage = ref(1)
+    const historyLogPageSize = ref(100)
+    const historyLogSearch = ref('')
+    const historyLogLevel = ref('all')
+
+    function getLogLineClass(line) {
+      if (line.includes('[ERROR]') || line.includes('失败')) return 'log-error'
+      if (line.includes('[WARN]') || line.includes('警告')) return 'log-warn'
+      if (line.includes('[INFO]')) return 'log-info'
+      if (line.includes('[DEBUG]')) return 'log-debug'
+      return 'log-default'
+    }
+
+    const filteredHistoryLogLines = computed(() => {
+      if (historyLogLevel.value === 'all') return historyLogLines.value
+      return historyLogLines.value.filter(line => {
+        if (historyLogLevel.value === 'error') return line.includes('[ERROR]') || line.includes('失败')
+        if (historyLogLevel.value === 'warn') return line.includes('[WARN]') || line.includes('警告')
+        if (historyLogLevel.value === 'info') return line.includes('[INFO]')
+        if (historyLogLevel.value === 'debug') return line.includes('[DEBUG]')
+        return true
+      })
+    })
+
+    async function loadHistoryLog() {
+      if (!detailModal.value) return
+      try {
+        const params = new URLSearchParams({page: historyLogPage.value, page_size: historyLogPageSize.value})
+        if (historyLogSearch.value) params.set('search', historyLogSearch.value)
+        const r = await fetch(`/api/tasks/${detailModal.value.id}/logs/history?${params}`)
+        const d = await r.json()
+        historyLogLines.value = d.list || []
+        historyLogTotal.value = d.total || 0
+      } catch(e) { historyLogLines.value = [] }
+    }
+
     function showDetail(t) {
       detailModal.value = t
-      logContent.value = ''
-      if (logSource) { logSource.close(); logSource = null }
-      const es = new EventSource(`/api/tasks/${t.id}/logs`)
-      logSource = es
-      es.onmessage = e => {
-        logContent.value += e.data.replace(/data:\s*/, '') + '\n'
-        nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
-      }
-      es.onerror = () => {}
+      detailTab.value = 'info'
+      historyLogPage.value = 1
+      historyLogSearch.value = ''
+      historyLogLevel.value = 'all'
+      historyLogLines.value = []
+      // 后台预加载历史日志，切换到日志Tab时数据已就绪
+      loadHistoryLog()
     }
     function closeDetail() {
-      if (logSource) { logSource.close(); logSource = null }
       detailModal.value = null
-      logContent.value = ''
     }
 
-    function showLog(t) {
-      detailTask.value = t
-      logContent.value = ''
-      if (logSource) { logSource.close(); logSource = null }
-      const es = new EventSource(`/api/tasks/${t.id}/logs`)
-      logSource = es
-      es.onmessage = e => {
-        logContent.value += e.data.replace(/data:\s*/, '') + '\n'
-        nextTick(() => { if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight })
-      }
-    }
-
-    function closeLog() {
-      if (logSource) { logSource.close(); logSource = null }
-      detailTask.value = null
-      logContent.value = ''
+    function clearSystemLogs() {
+      systemLogs.value = []
     }
 
     const canAddVideo = computed(() => {
@@ -551,24 +649,61 @@ createApp({
         }
       }
       connectTaskEvents()
+
+      // 连接系统资源 SSE
+      function connectSystemStats() {
+        if (systemStatsSource) { systemStatsSource.close() }
+        const es = new EventSource('/api/system/stats/stream')
+        systemStatsSource = es
+        es.onmessage = (e) => {
+          try {
+            systemStats.value = JSON.parse(e.data)
+          } catch(err) {}
+        }
+        es.onerror = () => {
+          console.warn('[SSE System] 连接断开')
+        }
+      }
+      connectSystemStats()
+
+      // 连接系统日志 SSE
+      function connectSystemLogs() {
+        if (systemLogsSource) { systemLogsSource.close() }
+        const es = new EventSource('/api/system/logs')
+        systemLogsSource = es
+        es.onmessage = (e) => {
+          systemLogs.value.push(e.data)
+          // 限制日志条数
+          if (systemLogs.value.length > 1000) {
+            systemLogs.value = systemLogs.value.slice(-1000)
+          }
+        }
+        es.onerror = () => {
+          console.warn('[SSE System Logs] 连接断开')
+        }
+      }
+      connectSystemLogs()
     })
     onUnmounted(() => {
       clearInterval(pollTimer)
-      if (logSource) logSource.close()
       if (taskSource) taskSource.close()
+      if (systemStatsSource) systemStatsSource.close()
+      if (systemLogsSource) systemLogsSource.close()
     })
 
-    return { tasks, sources, filter, tab, detailTask, logContent, logBox, pollMsg, polling, starting, schedulerConfig, downloadConfig, newSource, deleteTarget, editingSource,
+    return { tasks, sources, filter, tab, pollMsg, polling, starting, batchLoading, schedulerConfig, downloadConfig, newSource, deleteTarget, editingSource,
              showAddModal, showPollModal,
              activeCount, completedCount, failedCount, waitingCount, stoppedCount, downloadingCount, mergingCount, movingCount, totalSpeed, filteredTasks, stageLabel, relativeTime,
              fetchTasks, fetchSources, fetchScheduler, fetchConfig, pollNow, pollSourceById, addSource, editSource, saveSource, toggleSource, delSource, pollSource, toggleScheduler, updateScheduler,
-             deleteTask, confirmDelete, showLog, closeLog,
+             deleteTask, confirmDelete,
              configSaved, configSaving, saveDownloadConfig, saveSchedulerConfig, retryTask, startTask, stopTask,
              selected, selectedCount, allSelected, canBatchStart, canBatchStop, canBatchRetry, viewMode, page, pageSize, totalPages, showPagination, goPage, setPageSize,
              toggleSelect, toggleSelectAll, batchStart, batchStop, batchRetry, batchDelete, toggleViewMode,
-             showAddModal, addUrl, adding, addMsg, doAddVideo, canAddVideo,
+             addUrl, adding, addMsg, doAddVideo, canAddVideo,
              addMode, addM3u8Url, addM3u8Name, addM3u8Headers, addDownloadDir,
              proxyConfig, proxySaved, proxySaving, saveProxyConfig,
-             searchQuery, sortBy, onSearchChange, detailModal, showDetail, closeDetail }
+             logConfig, logSaved, logSaving, saveLogConfig,
+             searchQuery, sortBy, onSearchChange, detailModal, detailTab, historyLogLines, historyLogTotal, historyLogPage, historyLogPageSize, historyLogSearch, historyLogLevel, getLogLineClass, filteredHistoryLogLines, loadHistoryLog, showDetail, closeDetail,
+             systemStats, systemLogs, clearSystemLogs }
   }
 }).mount('#app')

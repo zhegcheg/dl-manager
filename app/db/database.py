@@ -9,13 +9,22 @@ from datetime import datetime
 from typing import Optional
 
 DB_PATH = Path.home() / ".dl-manager" / "state.db"
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-def get_db():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+# 初始化时设置一次 PRAGMA，后续连接只需继承
+def _init_pragmas():
+    """一次性设置 WAL 和 busy_timeout"""
     conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
+    conn.close()
+
+_init_pragmas()
+
+def get_db():
+    """获取 SQLite 连接（轻量级，PRAGMA 已在初始化时设置）"""
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
     return conn
 
 def init():
@@ -125,6 +134,14 @@ def init():
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS proxy_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    # 默认日志配置表
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS log_config (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -501,13 +518,48 @@ def set_download_config(key: str, value: str):
     conn.commit()
     conn.close()
 
+def get_log_config() -> dict:
+    """获取日志配置（日志级别、日志保存路径）"""
+    defaults = {
+        "log_level": "INFO",
+        "log_path": str(Path.home() / ".dl-manager" / "logs" / "dl-manager.log"),
+    }
+    conn = get_db()
+    try:
+        rows = conn.execute("SELECT * FROM log_config").fetchall()
+        conn.close()
+        result = defaults.copy()
+        for r in rows:
+            result[r["key"]] = r["value"]
+        return result
+    except Exception:
+        conn.close()
+        return defaults
+
+def set_log_config(key: str, value: str):
+    now = datetime.utcnow().isoformat() + "Z"
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO log_config (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?",
+            (key, value, now, value, now)
+        )
+        conn.commit()
+    except Exception:
+        conn.close()
+        return
+    conn.close()
+
 def get_proxy_config() -> dict:
-    """获取代理配置（启用状态、类型、主机、端口）"""
+    """获取代理配置（启用状态、类型、主机、端口、用户名、密码）"""
     defaults = {
         "enabled": "false",
         "type": "http",
         "host": "",
         "port": "7890",
+        "username": "",
+        "password": "",
     }
     conn = get_db()
     rows = conn.execute("SELECT * FROM proxy_config").fetchall()

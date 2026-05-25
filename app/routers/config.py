@@ -13,6 +13,7 @@ from app.db.database import (
     get_scheduler_config, set_scheduler_config,
     get_download_config, set_download_config,
     get_proxy_config, set_proxy_config,
+    get_log_config, set_log_config,
 )
 from app.services.queue import get_active_downloads, apply_max_concurrent
 from app.services.scheduler import reschedule
@@ -46,7 +47,8 @@ def get_config():
     scheduler = get_scheduler_config()
     download = get_download_config()
     proxy = get_proxy_config()
-    return {"data": {**scheduler, **download, **proxy}}
+    log = get_log_config()
+    return {"data": {**scheduler, **download, **proxy, **log}}
 
 
 @router.post("/api/config")
@@ -131,7 +133,7 @@ def get_proxy():
 def save_proxy(body: dict):
     """保存代理配置"""
     results = {}
-    for key in ("enabled", "type", "host", "port"):
+    for key in ("enabled", "type", "host", "port", "username", "password"):
         if key in body:
             value = str(body[key]).strip()
             if key == "enabled":
@@ -150,6 +152,44 @@ def save_proxy(body: dict):
                     continue
             set_proxy_config(key, value)
             results[key] = value
+    return {"message": "已保存", "data": results}
+
+
+# ── 日志配置 ──
+@router.get("/api/log-config")
+def get_log_config_api():
+    return {"data": get_log_config()}
+
+
+@router.post("/api/log-config")
+def save_log_config(body: dict):
+    """保存日志配置"""
+    results = {}
+    for key in ("log_level", "log_path"):
+        if key in body:
+            value = str(body[key]).strip()
+            if key == "log_level":
+                valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR"]
+                if value.upper() in valid_levels:
+                    value = value.upper()
+                else:
+                    value = "INFO"
+            set_log_config(key, value)
+            results[key] = value
+    
+    # 动态更新日志级别和文件输出
+    if "log_level" in body or "log_path" in body:
+        try:
+            import app.main
+            log_level = body.get("log_level", "INFO").upper()
+            log_path = body.get("log_path", "")
+            if log_path:
+                app.main.setup_file_handler(log_path, log_level)
+            else:
+                app.main.update_log_level(log_level)
+        except Exception as e:
+            pass
+    
     return {"message": "已保存", "data": results}
 
 
