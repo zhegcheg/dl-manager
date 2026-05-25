@@ -154,12 +154,27 @@ def move_to_media_library(task_id: str, file_path: str, final_name: str = None, 
     else:
         dest_name = src.name
 
-    # CIFS 文件名上限约 255 字符，截断到 80 安全（base+ext 都要截断）
-    base, ext = os.path.splitext(dest_name)
-    if len(dest_name) > 200:
-        dest_name = base[:80] + ext
-
     dest = dest_dir / dest_name
+
+    # CIFS 文件名上限约 255 字符，按字节计算
+    # 完整目标路径（含目录）不超过 240 字节，文件名部分留 220 字节安全余量
+    full_path_bytes = len(str(dest.resolve()).encode('utf-8'))
+    if full_path_bytes > 240:
+        max_name_bytes = 220  # 文件名部分最多 220 字节
+        base, ext = os.path.splitext(dest_name)
+        # 按字节截断 base，确保 base + ext 总字节数在限制内
+        ext_bytes = len(ext.encode('utf-8'))
+        max_base_bytes = max_name_bytes - ext_bytes
+        if max_base_bytes > 0:
+            encoded = base.encode('utf-8')
+            if len(encoded) > max_base_bytes:
+                encoded = encoded[:max_base_bytes]
+                dest_name = encoded.decode('utf-8', errors='ignore') + ext
+            else:
+                dest_name = base + ext
+        else:
+            dest_name = base[:80] + ext
+        dest = dest_dir / dest_name
 
     # 启动后台复制线程
     t = threading.Thread(target=_do_copy, args=(task_id, src, dest), daemon=True)
