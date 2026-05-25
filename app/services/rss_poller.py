@@ -284,7 +284,7 @@ def poll_webpage_source(source: dict) -> list:
 
         task = create_task(vid, info["name"], info["m3u8_url"],
                           info["headers"], info["key"], info["iv"],
-                          source_id=source.get("id"))
+                          source_id=source.get("id"), video_url=video_url)
         if task["status"] in ("waiting",):
             new_tasks.append(task)
 
@@ -331,7 +331,7 @@ def poll_rss_source(source: dict) -> list:
 
             task = create_task(vid, info["name"], info["m3u8_url"],
                               info["headers"], info["key"], info["iv"],
-                              source_id=source.get("id"))
+                              source_id=source.get("id"), video_url=link)
             if task["status"] in ("waiting",):
                 new_tasks.append(task)
     except ET.ParseError as e:

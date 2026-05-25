@@ -79,6 +79,10 @@ def init():
     except sqlite3.OperationalError:
         pass  # 字段已存在
     try:
+        conn.execute("ALTER TABLE tasks ADD COLUMN video_url TEXT DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # 字段已存在
+    try:
         conn.execute("ALTER TABLE tasks ADD COLUMN temp_dir TEXT DEFAULT ''")
     except sqlite3.OperationalError:
         pass  # 字段已存在
@@ -238,7 +242,7 @@ def get_task_temp_dir() -> str:
     return str(Path(base) / "_temp")
 
 
-def create_task(task_id: str, name: str, m3u8_url: str, headers: str = "", key: str = "", iv: str = "", priority: int = 0, download_dir: str = "", source_id: int = None) -> dict:
+def create_task(task_id: str, name: str, m3u8_url: str, headers: str = "", key: str = "", iv: str = "", priority: int = 0, download_dir: str = "", source_id: int = None, video_url: str = "") -> dict:
     now = datetime.utcnow().isoformat() + "Z"
     # 自动计算下载目录：优先使用传入的 download_dir，否则按订阅源计算
     if not download_dir:
@@ -254,9 +258,9 @@ def create_task(task_id: str, name: str, m3u8_url: str, headers: str = "", key: 
     conn = get_db()
     try:
         conn.execute("""
-            INSERT INTO tasks (id, name, m3u8_url, headers, key, iv, status, stage, priority, download_dir, source_id, source_name, temp_dir, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'waiting', 'waiting', ?, ?, ?, ?, ?, ?, ?)
-        """, (task_id, name, m3u8_url, headers, key, iv, priority, download_dir, source_id, source_name, temp_dir, now, now))
+            INSERT INTO tasks (id, name, m3u8_url, headers, key, iv, status, stage, priority, download_dir, source_id, source_name, video_url, temp_dir, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'waiting', 'waiting', ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (task_id, name, m3u8_url, headers, key, iv, priority, download_dir, source_id, source_name, video_url, temp_dir, now, now))
         conn.commit()
     except sqlite3.IntegrityError:
         if key or iv:

@@ -359,7 +359,7 @@
             <div style="font-size:14px;color:#fff;">[[ s.name ]]</div>
             <div style="font-size:11px;color:#888;margin-top:2px;">[[ s.url ]]</div>
           </div>
-          <div style="font-size:11px;color:#ff6b9d;">🔄 刷新</div>
+          <button class="btn sm" style="border-color:#ff6b9d;color:#ff6b9d;padding:6px 16px;font-size:13px;" @click.stop="pollSourceById(s.id)" @mouseenter="event.stopPropagation()" @mouseleave="event.stopPropagation()">🔄 刷新</button>
         </div>
         <div v-if="!sources.length" style="color:#888;text-align:center;padding:24px;">暂无订阅源</div>
       </div>

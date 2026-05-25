@@ -29,8 +29,10 @@ def _ts():
 
 def refresh_m3u8_url(task_id: str) -> str:
     """
-    下载前刷新 m3u8 URL。
-    通过任务关联的订阅源配置构建刷新 URL，不再硬编码站点。
+    下载前刷新 m3u8 URL 和 AES key/iv。
+    优先使用订阅源配置的 refresh_url_pattern 模板，
+    回退到任务保存的 video_url（如 RSS <link>），
+    重新解析页面获取最新的 m3u8/key/iv，防止 key 过期。
     """
     try:
         from app.services.rss_poller import resolve_video_info
@@ -45,18 +47,29 @@ def refresh_m3u8_url(task_id: str) -> str:
 
         # 构建刷新 URL：优先使用订阅源配置的模板
         refresh_pattern = (source_config or {}).get("refresh_url_pattern", "")
-        if not refresh_pattern:
-            logger.debug(f"[refresh_m3u8_url] {task_id}: 未配置 refresh_url_pattern，跳过刷新")
+        video_url = ""
+        if refresh_pattern:
+            video_url = refresh_pattern.replace("{task_id}", task_id)
+        
+        # 回退：使用任务保存的 video_url（如 RSS <link>）
+        if not video_url:
+            video_url = task.get("video_url", "")
+        
+        if not video_url:
+            logger.debug(f"[refresh_m3u8_url] {task_id}: 无 refresh_url_pattern 且无 video_url，跳过刷新")
             return ""
 
-        video_url = refresh_pattern.replace("{task_id}", task_id)
+        logger.info(f"[refresh_m3u8_url] {task_id}: 使用 video_url={video_url} 重新解析")
         info = resolve_video_info(video_url, source_config=source_config)
         if info and info.get("m3u8_url"):
-            # 同步更新 AES 密钥
+            # 同步更新 AES 密钥和 m3u8
+            updates = {"m3u8_url": info["m3u8_url"]}
             if info.get("key"):
-                update_task(task_id, key=info["key"])
+                updates["key"] = info["key"]
             if info.get("iv"):
-                update_task(task_id, iv=info["iv"])
+                updates["iv"] = info["iv"]
+            update_task(task_id, **updates)
+            logger.info(f"[refresh_m3u8_url] {task_id}: 已刷新 m3u8/key/iv")
             return info["m3u8_url"]
     except Exception as e:
         logger.warning(f"[refresh_m3u8_url] {task_id}: 刷新失败 - {e}")
@@ -328,7 +341,7 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
         update_task(task_id, status="failed", stage="failed", error="任务记录不存在")
         return None
 
-    logger.info(f"[下载] 开始任务 {task_id}: {task.get('title', '未知')}")
+    logger.info(f"[下载] 开始任务 {task_id}: {task.get('name', '未知')}")
 
     # download_dir：任务记录 > 按订阅源计算 > 全局配置
     download_dir = task.get("download_dir", "")
@@ -361,14 +374,6 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
     cfg = get_download_config()
     thread_count = int(cfg.get("thread_count", "8"))
 
-    # 下载前刷新 m3u8 URL
-    fresh_url = refresh_m3u8_url(task_id)
-    if fresh_url:
-        m3u8_url = fresh_url
-        logger.info(f"[download] {task_id}: 已刷新 m3u8 URL")
-    else:
-        logger.warning(f"[download] {task_id}: 刷新失败，使用缓存 URL")
-
     # 创建下载句柄
     download_handle = DownloadThread(task_id)
 
@@ -388,17 +393,6 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
     write_log(f"下载目录: {download_dir}")
     write_log(f"线程数: {thread_count}")
     write_log("下载模式: 子进程（GIL 隔离）")
-
-    # 刷新 m3u8 URL（如果需要）
-    refresh_url = task.get("refresh_url", "")
-    if refresh_url:
-        try:
-            refreshed_url = refresh_m3u8_url(task_id)
-            if refreshed_url:
-                m3u8_url = refreshed_url
-                write_log(f"m3u8 URL 已刷新")
-        except Exception as e:
-            write_log(f"刷新 m3u8 URL 异常: {e}", "WARN")
 
     # 构建 yt-dlp 命令
     cmd = _build_ytdlp_cmd(m3u8_url, temp_dir, task_id, thread_count, headers)

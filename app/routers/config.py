@@ -72,7 +72,7 @@ def batch_update_config(body: dict):
                 try:
                     v = int(value)
                     if key == "max_concurrent":
-                        v = max(1, min(10, v))
+                        v = max(1, min(99, v))
                     elif key == "thread_count":
                         v = max(1, min(16, v))
                     value = str(v)
@@ -99,7 +99,7 @@ def apply_config(body: dict):
             value = str(body[key]).strip()
             if key == "max_concurrent":
                 try:
-                    v = max(1, min(10, int(value)))
+                    v = max(1, min(99, int(value)))
                     value = str(v)
                     set_download_config(key, value)
                     stopped = apply_max_concurrent(v)

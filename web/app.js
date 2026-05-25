@@ -331,7 +331,7 @@ createApp({
     }
 
     async function saveDownloadConfig() {
-      const mc = Math.max(1, Math.min(10, parseInt(downloadConfig.value.max_concurrent) || 2))
+      const mc = Math.max(1, Math.min(99, parseInt(downloadConfig.value.max_concurrent) || 2))
       const tc = Math.max(1, Math.min(16, parseInt(downloadConfig.value.thread_count) || 8))
       downloadConfig.value.max_concurrent = mc
       downloadConfig.value.thread_count = tc

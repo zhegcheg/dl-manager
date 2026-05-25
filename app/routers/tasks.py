@@ -287,7 +287,7 @@ def batch_stop_tasks(body: BatchTaskRequest):
 
 @router.post("/api/tasks/batch/retry")
 def batch_retry_tasks(body: BatchTaskRequest):
-    """批量重试失败任务"""
+    """批量重试失败任务（仅重置状态，m3u8/key刷新由下载器启动时异步完成）"""
     success = []
     failed = []
     
@@ -306,6 +306,18 @@ def batch_retry_tasks(body: BatchTaskRequest):
             from app.services.queue import is_downloading as qm_is_running, unregister_download
             if qm_is_running(task_id):
                 unregister_download(task_id)
+            
+            # 如果 video_url 为空，尝试从 source_id 恢复（供下载器刷新用）
+            video_url = task.get("video_url", "")
+            if not video_url and task.get("source_id"):
+                from app.db.database import get_source
+                source = get_source(task.get("source_id"))
+                if source:
+                    refresh_pattern = source.get("refresh_url_pattern", "")
+                    if refresh_pattern:
+                        video_url = refresh_pattern.replace("{task_id}", task_id)
+                        update_task(task_id, video_url=video_url)
+                        logger.info(f"[批量重试] {task_id}: 从订阅源配置恢复 video_url")
             
             reset_task_for_manual_retry(task_id)
             success.append(task_id)
@@ -416,7 +428,7 @@ def create_task_from_url(body: dict):
         raise HTTPException(502, f"无法从页面提取 m3u8: {video_url}")
     task = create_task(info["id"], info["name"], info["m3u8_url"],
                        info.get("headers", ""), info.get("key", ""), info.get("iv", ""),
-                       download_dir=download_dir)
+                       download_dir=download_dir, video_url=video_url)
     try_start_next()
     return {"data": [task]}
 
@@ -488,17 +500,32 @@ def stop_task(task_id: str):
 
 @router.post("/api/tasks/{task_id}/retry")
 def retry_task(task_id: str):
-    """手动重试：不受次数限制，重置 retry_count=0"""
+    """手动重试：不受次数限制，重置 retry_count=0（m3u8/key刷新由下载器启动时异步完成）"""
     from app.services.queue import is_downloading as qm_is_running, unregister_download
+    
     task = get_task(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    
     proc = running_procs.get(task_id)
     if proc:
         proc.terminate()
         running_procs.pop(task_id, None)
     if qm_is_running(task_id):
         unregister_download(task_id)
+    
+    # 如果 video_url 为空，尝试从 source_id 恢复（供下载器刷新用）
+    video_url = task.get("video_url", "")
+    if not video_url and task.get("source_id"):
+        from app.db.database import get_source
+        source = get_source(task.get("source_id"))
+        if source:
+            refresh_pattern = source.get("refresh_url_pattern", "")
+            if refresh_pattern:
+                video_url = refresh_pattern.replace("{task_id}", task_id)
+                update_task(task_id, video_url=video_url)
+                logger.info(f"[重试] {task_id}: 从订阅源配置恢复 video_url")
+    
     last_error = reset_task_for_manual_retry(task_id)
     try_start_next()
     return {

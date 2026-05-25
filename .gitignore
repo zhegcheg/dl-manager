@@ -13,4 +13,6 @@ web/nas
 CLAUDE.md
 .lingma
 NUL*
+*.ytdl
+check_*.py
 screenshot_*.png

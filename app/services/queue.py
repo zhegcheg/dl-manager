@@ -1,13 +1,16 @@
 """
 下载队列管理器
 - 优先级队列（priority DESC, created_at ASC）
-- 智能重试（指数退避）
+- 智能重试（有进度→同URL重试，无进度→刷新URL重试，最多3次）
 - 并发控制
 """
+import logging
 import threading
 import time
 from datetime import datetime, timedelta
 from app.db.database import get_task, list_tasks, update_task, get_download_config
+
+logger = logging.getLogger("dl-manager")
 
 
 _running = {}  # task_id -> proc/thread
@@ -60,22 +63,58 @@ def try_start_next() -> int:
             if tid in _order:
                 _order.remove(tid)
     for tid in dead:
-        # 检测：线程死了但DB里还是 downloading → 卡死
         t = get_task(tid)
-        if t and t["status"] == "downloading":
-            if _should_retry(t):
-                # 重置状态，等待重试（带退避时间）
-                retry_count = t.get("retry_count", 0) + 1
-                backoff = RETRY_BACKOFF[min(retry_count - 1, len(RETRY_BACKOFF) - 1)]
-                retry_after = (datetime.utcnow() + timedelta(seconds=backoff)).isoformat() + "Z"
-                update_task(tid, status="waiting", stage="waiting", progress=0,
-                           speed="", segments="", error="",
-                           retry_count=retry_count, retry_after=retry_after)
-                started += 1
+        if not t:
+            continue
+
+        # 进程死亡但状态仍是 downloading → 外部杀死（重启/手动停），不算失败
+        if t["status"] == "downloading":
+            logger.info(f"[队列] {tid}: 进程外部终止（状态仍为 downloading），直接重试")
+            update_task(tid, status="waiting", stage="waiting",
+                        speed="", segments="", error="")
+            started += 1
+            continue
+
+        # 状态为 failed → yt-dlp 报错（401/超时等），启动自动重试流程
+        if t["status"] != "failed":
+            continue
+
+        # 检查是否是自动重试触发的失败（error 含“自动重试”字样）
+        # 或普通失败 → 统一走自动重试逻辑
+        error_msg = t.get("error", "")
+
+        # 只对有 video_url 的任务启用自动重试（才能刷新 URL）
+        video_url = t.get("video_url", "")
+        if not video_url and not t.get("source_id"):
+            # 无法刷新 URL 的失败任务，保持 failed 状态
+            continue
+
+        retry_count = t.get("retry_count", 0) + 1
+
+        if retry_count > 3:
+            # 3 次自动重试全部失败
+            update_task(tid, error=f"自动重试 3 次后放弃: {error_msg}")
+            logger.warning(f"[队列] {tid}: 自动重试 3 次后放弃")
+            continue
+
+        # 刷新 URL：从 video_url 重新获取 m3u8/key/iv
+        logger.info(f"[队列] {tid}: 第 {retry_count}/3 次自动重试，刷新 URL")
+        try:
+            from app.services.downloader import refresh_m3u8_url
+            fresh = refresh_m3u8_url(tid)
+            if fresh:
+                logger.info(f"[队列] {tid}: URL 刷新成功")
             else:
-                # 超过重试次数，标记失败
-                update_task(tid, status="failed", stage="failed",
-                          error="下载进程异常退出，自动重试3次后放弃")
+                logger.warning(f"[队列] {tid}: URL 刷新失败，使用缓存")
+        except Exception as e:
+            logger.warning(f"[队列] {tid}: URL 刷新异常 - {e}")
+
+        backoff = RETRY_BACKOFF[min(retry_count - 1, len(RETRY_BACKOFF) - 1)]
+        retry_after = (datetime.utcnow() + timedelta(seconds=backoff)).isoformat() + "Z"
+        update_task(tid, status="waiting", stage="waiting", progress=0,
+                    speed="", segments="", error="",
+                    retry_count=retry_count, retry_after=retry_after)
+        started += 1
 
     with _lock:
         active = len(_running)
@@ -119,12 +158,6 @@ def try_start_next() -> int:
             continue
 
     return started
-
-
-def _should_retry(task: dict) -> bool:
-    """检查任务是否应该重试"""
-    retry_count = task.get("retry_count", 0)
-    return retry_count < 3
 
 
 def _can_start_now(task: dict) -> bool:

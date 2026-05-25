@@ -35,9 +35,9 @@ const SettingsView = {
             <div class="form-group">
               <label class="form-label">
                 最大并发数
-                <span class="form-hint">(上限10)</span>
+                <span class="form-hint">(上限99)</span>
               </label>
-              <input v-model="downloadConfig.max_concurrent" placeholder="2" type="number" min="1" max="10" class="form-input form-input-sm">
+              <input v-model="downloadConfig.max_concurrent" placeholder="2" type="number" min="1" max="99" class="form-input form-input-sm">
             </div>
             <div class="form-group">
               <label class="form-label">
