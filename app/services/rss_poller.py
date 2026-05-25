@@ -182,6 +182,25 @@ def fetch_jable_m3u8_key(m3u8_url: str) -> tuple[str, str]:
 
     return key, iv
 
+
+def resolve_video_info(video_url: str) -> dict:
+    """
+    从视频页面 URL 获取完整的下载信息（m3u8_url + AES 密钥）。
+    统一的入口函数，供定时轮询、手动添加、下载前刷新三个场景复用。
+    
+    返回: {id, name, m3u8_url, key, iv, headers} 或 {} （失败时）
+    """
+    info = extract_jable_info(video_url)
+    if not info or not info.get("m3u8_url"):
+        return {}
+    # 如果页面未直接提供 AES 密钥，从 m3u8 manifest 获取
+    if not info.get("key"):
+        key, iv = fetch_jable_m3u8_key(info["m3u8_url"])
+        info["key"] = key
+        info["iv"] = iv
+    return info
+
+
 def poll_jable_source(source: dict) -> list[dict]:
     """
     轮询单个 Jable 订阅源（从页面抓取视频列表）
@@ -212,15 +231,9 @@ def poll_jable_source(source: dict) -> list[dict]:
 
     new_tasks = []
     for video_url in video_urls:
-        info = extract_jable_info(video_url)
-        if not info or not info.get("m3u8_url"):
+        info = resolve_video_info(video_url)
+        if not info:
             continue
-
-        # 获取 AES 密钥（如果页面没有）
-        if not info.get("key"):
-            key, iv = fetch_jable_m3u8_key(info["m3u8_url"])
-            info["key"] = key
-            info["iv"] = iv
 
         # 检查是否已存在（已完成/下载中/等待中 → 跳过）
         vid = info["id"]
@@ -256,16 +269,11 @@ def already_downloaded(video_id: str) -> bool:
 
 def fetch_all_video_details(video_urls: list) -> list[dict]:
     """并发提取所有视频详情"""
+    from concurrent.futures import ThreadPoolExecutor
     results = []
     def fetch_one(video_url):
-        info = extract_jable_info(video_url)
-        if info.get("m3u8_url"):
-            if not info.get("key"):
-                key, iv = fetch_jable_m3u8_key(info["m3u8_url"])
-                info["key"] = key
-                info["iv"] = iv
-            return info
-        return None
+        info = resolve_video_info(video_url)
+        return info if info else None
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(fetch_one, url): url for url in video_urls}

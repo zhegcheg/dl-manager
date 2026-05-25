@@ -90,23 +90,19 @@ def create_new_task(body: TaskCreate):
 @router.post("/api/tasks/from-url")
 def create_task_from_url(body: dict):
     """只提供 video_url，自动抓取页面标题和 m3u8，生成任务"""
-    from app.services.rss_poller import extract_jable_info, fetch_jable_m3u8_key
+    from app.services.rss_poller import resolve_video_info
     video_url = body.get("url") or body.get("video_url")
     if not video_url:
         raise HTTPException(400, "url or video_url required")
     download_dir = body.get("download_dir", "")
     import traceback
     try:
-        info = extract_jable_info(video_url)
+        info = resolve_video_info(video_url)
     except Exception as e:
-        print(f"[from-url] extract_jable_info failed: {e}\n{traceback.format_exc()}")
+        print(f"[from-url] resolve_video_info failed: {e}\n{traceback.format_exc()}")
         raise HTTPException(502, f"页面解析失败: {e}")
-    if not info or not info.get("m3u8_url"):
+    if not info:
         raise HTTPException(502, f"无法从页面提取 m3u8: {video_url}")
-    if not info.get("key"):
-        key, iv = fetch_jable_m3u8_key(info["m3u8_url"])
-        info["key"] = key
-        info["iv"] = iv
     task = create_task(info["id"], info["name"], info["m3u8_url"],
                        info.get("headers", ""), info.get("key", ""), info.get("iv", ""),
                        download_dir=download_dir)

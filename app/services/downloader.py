@@ -15,6 +15,31 @@ from app.services.queue import register_download, unregister_download
 POLL_INTERVAL = 1  # DB 更新频率（秒），避免写入太频繁
 
 
+def refresh_m3u8_url(task_id: str) -> str:
+    """
+    下载前刷新 m3u8 URL，避免 CDN Token 过期。
+    定时任务抓取的 m3u8 URL 含临时 Token，过一段时间就失效。
+    在实际下载前重新访问页面获取最新 URL。
+    """
+    try:
+        from app.services.rss_poller import resolve_video_info
+        task = get_task(task_id)
+        if not task:
+            return ""
+        video_url = f"https://jable.tv/videos/{task_id}/"
+        info = resolve_video_info(video_url)
+        if info and info.get("m3u8_url"):
+            # 同步更新 AES 密钥
+            if info.get("key"):
+                update_task(task_id, key=info["key"])
+            if info.get("iv"):
+                update_task(task_id, iv=info["iv"])
+            return info["m3u8_url"]
+    except Exception as e:
+        print(f"[refresh_m3u8_url] {task_id}: 刷新失败 - {e}")
+    return ""
+
+
 class DownloadThread:
     """下载线程包装，提供类似 subprocess.Popen 的接口"""
 
@@ -127,7 +152,15 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
     # 确保目录存在
     Path(download_dir).mkdir(parents=True, exist_ok=True)
     Path(temp_dir).mkdir(parents=True, exist_ok=True)
-    
+
+    # 下载前刷新 m3u8 URL（CDN Token 有时效性，定时任务抓取的 URL 可能已过期）
+    fresh_url = refresh_m3u8_url(task_id)
+    if fresh_url:
+        m3u8_url = fresh_url
+        print(f"[download] {task_id}: 已刷新 m3u8 URL")
+    else:
+        print(f"[download] {task_id}: 刷新失败，使用缓存 URL")
+
     # 创建下载线程对象
     download_thread = DownloadThread(task_id)
     
