@@ -310,39 +310,51 @@ def _monitor_and_postprocess(proc: subprocess.Popen, download_handle: DownloadTh
 def _post_download(task_id: str, download_dir: str, temp_dir: str,
                    write_log, download_handle: DownloadThread):
     """下载完成后处理：查找合并文件、移动到下载目录、可选 NAS 转移"""
-    # 诊断：列出 temp_dir 中与当前任务相关的文件
-    try:
-        all_files = list(Path(temp_dir).glob(f"{task_id}*"))
-        total_size = sum(f.stat().st_size for f in all_files if f.is_file())
-        write_log(f"temp_dir 中任务文件: {len(all_files)} 个, 总计 {total_size / (1024*1024):.2f} MB")
-        # 按扩展名分组统计
-        ext_count: dict = {}
-        for f in all_files:
-            if f.is_file():
-                ext = f.suffix or '(no ext)'
-                ext_count[ext] = ext_count.get(ext, 0) + 1
-        for ext, cnt in sorted(ext_count.items(), key=lambda x: -x[1]):
-            write_log(f"  {ext}: {cnt} 个文件")
-    except Exception as e:
-        write_log(f"列出 temp_dir 失败: {e}", "WARN")
+    # 诊断：列出 temp_dir 和 download_dir 中与当前任务相关的文件
+    for dir_label, dir_path in [("temp_dir", temp_dir), ("download_dir", download_dir)]:
+        try:
+            all_files = list(Path(dir_path).glob(f"{task_id}*"))
+            total_size = sum(f.stat().st_size for f in all_files if f.is_file())
+            write_log(f"{dir_label} 中任务文件: {len(all_files)} 个, 总计 {total_size / (1024*1024):.2f} MB")
+            ext_count: dict = {}
+            for f in all_files:
+                if f.is_file():
+                    ext = f.suffix or '(no ext)'
+                    ext_count[ext] = ext_count.get(ext, 0) + 1
+            for ext, cnt in sorted(ext_count.items(), key=lambda x: -x[1]):
+                write_log(f"  {ext}: {cnt} 个文件")
+        except Exception as e:
+            write_log(f"列出 {dir_label} 失败: {e}", "WARN")
 
-    # 查找合并后的视频文件（优先 mp4 > mkv > webm）
+    # 查找合并后的视频文件（优先在下载目录中找，再在 temp 目录中找）
+    # 搜索顺序: download_dir > temp_dir，格式优先 mp4 > mkv > webm
     video_path = None
-    for ext in ('.mp4', '.mkv', '.webm', '.mov'):
-        candidate = Path(temp_dir) / f"{task_id}{ext}"
-        if candidate.exists() and candidate.stat().st_size > 0:
-            video_path = candidate
+    search_dirs = [Path(download_dir), Path(temp_dir)]
+
+    # 1. 精确匹配: {task_id}.ext
+    for search_dir in search_dirs:
+        for ext in ('.mp4', '.mkv', '.webm', '.mov'):
+            candidate = search_dir / f"{task_id}{ext}"
+            if candidate.exists() and candidate.stat().st_size > 0:
+                video_path = candidate
+                write_log(f"在 {search_dir.name}/ 中找到视频: {candidate.name}")
+                break
+        if video_path:
             break
 
-    # 回退：模糊匹配（带格式后缀如 {task_id}.f1234.mp4）
+    # 2. 回退：模糊匹配（带格式后缀如 {task_id}.f1234.mp4）
     if not video_path:
-        for ext in ('.mp4', '.mkv', '.webm'):
-            candidates = [f for f in Path(temp_dir).glob(f"{task_id}*{ext}")
-                          if f.is_file() and f.stat().st_size > 0
-                          and '.part' not in f.name]
-            if candidates:
-                candidates.sort(key=lambda f: f.stat().st_size, reverse=True)
-                video_path = candidates[0]
+        for search_dir in search_dirs:
+            for ext in ('.mp4', '.mkv', '.webm'):
+                candidates = [f for f in search_dir.glob(f"{task_id}*{ext}")
+                              if f.is_file() and f.stat().st_size > 0
+                              and '.part' not in f.name]
+                if candidates:
+                    candidates.sort(key=lambda f: f.stat().st_size, reverse=True)
+                    video_path = candidates[0]
+                    write_log(f"在 {search_dir.name}/ 中模糊匹配到视频: {video_path.name}")
+                    break
+            if video_path:
                 break
 
     # 回退：检查 .mp4.part 文件（yt-dlp 已合并但未完成最终输出）
@@ -398,37 +410,54 @@ def _post_download(task_id: str, download_dir: str, temp_dir: str,
         return
 
     write_log(f"视频文件就绪: {video_path.name} ({video_path.stat().st_size / (1024*1024):.2f} MB)")
+    write_log(f"视频文件完整路径: {video_path}")
+    write_log(f"目标下载目录: {download_dir}")
 
-    # 移动到下载目录
-    write_log(f"开始移动文件到: {download_dir}")
-    # 文件名长度保护（Windows MAX_PATH 260 字符限制）
-    mp4_name = video_path.name
-    if len(mp4_name) > 200:
-        stem = video_path.stem[:180]
-        mp4_name = stem + video_path.suffix
-    final_mp4 = Path(download_dir) / mp4_name
-    # 防止文件名冲突
-    if final_mp4.exists():
-        stem = final_mp4.stem
-        suffix = final_mp4.suffix
-        counter = 1
-        while final_mp4.exists():
-            final_mp4 = Path(download_dir) / f"{stem}_{counter}{suffix}"
-            counter += 1
-    try:
-        shutil.move(str(video_path), str(final_mp4))
-        write_log(f"文件已移动到: {final_mp4}")
-    except Exception as move_err:
-        write_log(f"移动失败，回退到复制: {move_err}", "WARN")
-        shutil.copy2(str(video_path), str(final_mp4))
-        video_path.unlink()
-        write_log(f"文件已复制到: {final_mp4}")
+    # 如果视频已在下载目录中（非temp_dir），跳过移动
+    if str(video_path.parent) == str(Path(download_dir).resolve()):
+        write_log(f"视频文件已在下载目录中，无需移动")
+        final_mp4 = video_path
+    else:
+        # 移动到下载目录
+        write_log(f"开始移动文件到: {download_dir}")
+        # 文件名长度保护（Windows MAX_PATH 260 字符限制）
+        mp4_name = video_path.name
+        if len(mp4_name) > 200:
+            stem = video_path.stem[:180]
+            mp4_name = stem + video_path.suffix
+        final_mp4 = Path(download_dir) / mp4_name
+        # 防止文件名冲突
+        if final_mp4.exists():
+            stem = final_mp4.stem
+            suffix = final_mp4.suffix
+            counter = 1
+            while final_mp4.exists():
+                final_mp4 = Path(download_dir) / f"{stem}_{counter}{suffix}"
+                counter += 1
+        try:
+            shutil.move(str(video_path), str(final_mp4))
+            write_log(f"文件已移动到: {final_mp4}")
+        except Exception as move_err:
+            write_log(f"移动失败: {move_err}，回退到复制", "WARN")
+            try:
+                shutil.copy2(str(video_path), str(final_mp4))
+                video_path.unlink()
+                write_log(f"文件已复制到: {final_mp4}")
+            except Exception as copy_err:
+                write_log(f"复制也失败: {copy_err}", "ERROR")
+                # 最后手段：直接使用 temp_dir 中的文件
+                final_mp4 = video_path
+                write_log(f"回退使用 temp_dir 中的文件: {final_mp4}", "WARN")
 
-    _cleanup_temp(temp_dir, task_id)
-    write_log("临时文件已清理")
+    # 只有当 final_mp4 不在 temp_dir 中时才清理临时文件
+    if str(final_mp4.parent) != str(Path(temp_dir).resolve()):
+        _cleanup_temp(temp_dir, task_id)
+        write_log("临时文件已清理")
+    else:
+        write_log(f"文件保留在 temp_dir 中（移动失败回退），跳过清理")
     update_task(task_id, status="completed", stage="completed",
                 progress=100, file=str(final_mp4))
-    write_log("任务完成 - 状态已更新为 completed")
+    write_log(f"任务完成 - 最终文件: {final_mp4}")
 
     # 检查是否启用 NAS 转移（未启用则跳过）
     cfg_now = get_download_config()
