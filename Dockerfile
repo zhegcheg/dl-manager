@@ -2,9 +2,9 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# 安装系统依赖 + ffmpeg (yt-dlp 合并需要)
+# 安装系统依赖: ffmpeg (视频合并) + pv (文件转移进度监控)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ffmpeg \
+    curl ffmpeg pv \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 Python 依赖

@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -40,7 +41,6 @@ def _cleanup_source_file(task_id: str):
 
 def _do_copy(task_id: str, src: Path, dest: Path):
     """后台复制线程 - 跨平台方案"""
-    import sys
     try:
         # 如果目标文件已存在，比较大小：谁大保留谁
         if dest.exists():
@@ -61,8 +61,8 @@ def _do_copy(task_id: str, src: Path, dest: Path):
         if sys.platform == 'win32':
             _copy_with_progress(task_id, src, dest, total_size, start)
         else:
-            # Linux: 使用 dd 命令
-            _copy_with_dd(task_id, src, dest, total_size, start)
+            # Linux: 使用 pv (Pipe Viewer) 命令，自带精确进度输出
+            _copy_with_pv(task_id, src, dest, total_size, start)
 
     except Exception as e:
         update_task(task_id, error=f"转移失败: {e}")
@@ -96,46 +96,49 @@ def _copy_with_progress(task_id: str, src: Path, dest: Path, total_size: int, st
     _cleanup_source_file(task_id)
 
 
-def _copy_with_dd(task_id: str, src: Path, dest: Path, total_size: int, start: float):
-    """Linux cp 命令复制，带进度汇报（解决 dd stdout 管道丢失问题）"""
+# pv 进度行正则: 匹配 elapsed_time 和 transfer_rate 和 percentage
+# 示例: " 1.2GiB 0:00:12 [ 105MiB/s] [======>          ] 35% ETA 0:00:22"
+_PV_PROGRESS_RE = re.compile(
+    r'(\d+:\d+:\d+)\s+'          # elapsed time
+    r'\[\s*([\d.]+\s*\S+/s)\]\s+' # transfer rate
+    r'\[.*?\]\s*'                  # progress bar
+    r'(\d+)%'                      # percentage
+)
+
+
+def _copy_with_pv(task_id: str, src: Path, dest: Path, total_size: int, start: float):
+    """Linux pv 命令复制，自带精确进度输出（百分比、速度、ETA）"""
     proc = subprocess.Popen(
-        ['cp', '--reflink=auto', str(src), str(dest)],
-        stdout=subprocess.PIPE,
+        ['pv', '-pterab', '-s', str(total_size), str(src)],
+        stdout=open(dest, 'wb'),
         stderr=subprocess.PIPE,
-        universal_newlines=True
     )
 
-    # 后台线程监控进度（cp 不支持 progress 输出，靠轮询文件大小）
-    def monitor_progress():
-        last_size = 0
-        while proc.poll() is None:
-            try:
-                if dest.exists():
-                    cur_size = dest.stat().st_size
-                    if cur_size != last_size:
-                        elapsed = time.time() - start
-                        speed_mbps = cur_size / (1024 * 1024) / elapsed if elapsed > 0 else 0
-                        progress = min(int(cur_size * 100 / total_size), 99)
-                        update_task(task_id,
-                                   stage="moving",
-                                   progress=progress,
-                                   move_speed=f"{speed_mbps:.1f}MB/s",
-                                   move_elapsed=f"{int(elapsed)}s")
-                        last_size = cur_size
-                    time.sleep(0.5)
-            except Exception:
-                pass
-
-    monitor_thread = threading.Thread(target=monitor_progress, daemon=True)
-    monitor_thread.start()
+    # 实时解析 pv 的 stderr 进度输出
+    for raw_line in proc.stderr:
+        try:
+            line = raw_line.decode('utf-8', errors='replace').strip()
+            m = _PV_PROGRESS_RE.search(line)
+            if m:
+                elapsed_str = m.group(1)   # "0:00:12"
+                speed_str = m.group(2).strip()  # "105MiB/s"
+                progress = min(int(m.group(3)), 99)
+                # 解析 elapsed 秒数
+                parts = elapsed_str.split(':')
+                elapsed_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                update_task(task_id,
+                           stage="moving",
+                           progress=progress,
+                           move_speed=speed_str,
+                           move_elapsed=f"{elapsed_sec}s")
+        except Exception:
+            pass
 
     proc.wait()
-    stdout, stderr = proc.communicate()
-
     if proc.returncode != 0:
         if dest.exists():
             dest.unlink()
-        update_task(task_id, error=f"转移失败: cp exit={proc.returncode}\n{stderr[:200]}")
+        update_task(task_id, error=f"转移失败: pv exit={proc.returncode}")
         return
 
     update_task(task_id, status="completed", stage="completed",

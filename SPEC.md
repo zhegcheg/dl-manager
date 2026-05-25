@@ -42,7 +42,7 @@
                          │ 合并完成
                          ▼
                     ┌──────────┐
-                    │ moving   │ ← 异步复制到 NAS (dd/Python)
+                    │ moving   │ ← 异步复制到 NAS (pv/Python)
                     └────┬─────┘
                          │ 转移完成
                          ▼
@@ -150,8 +150,13 @@ merger.py - merge_ts_to_mp4()
 ```
 move_to_media_library() → 启动后台线程
 
-Linux:  dd bs=4M status=progress → 解析 stderr 获取进度
+Linux:  pv -pterab -s {size} src > dest → 解析 stderr 获取精确进度 (百分比/速度/ETA)
 Windows: Python 原生 4MB chunk 复制 → 计算进度
+
+系统依赖: pv (Pipe Viewer) - 通过 apt install pv 安装，非 Python 包
+
+pv 进度输出格式 (stderr):
+  1.2GiB 0:00:12 [ 105MiB/s] [======>          ] 35% ETA 0:00:22
 
 完成后:
   - 更新 status=completed, final_path=NAS路径
@@ -341,7 +346,7 @@ Vue 3 (CDN, 无构建) → 单页应用 + 组件化拆分
 ```dockerfile
 # Dockerfile
 FROM python:3.10-slim
-RUN apt-get install -y curl ffmpeg   # ffmpeg 用于合并
+RUN apt-get install -y curl ffmpeg pv   # ffmpeg 用于合并, pv 用于转移进度
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
