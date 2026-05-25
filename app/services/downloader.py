@@ -542,6 +542,80 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
     write_log(f"线程数: {thread_count}")
     write_log("下载模式: 子进程（GIL 隔离）")
 
+    # === 前置检查：是否已有合并完成的视频文件（避免重复下载浪费流量） ===
+    existing_video = None
+    for search_dir in [Path(download_dir), Path(temp_dir)]:
+        for ext in ('.mp4', '.mkv', '.webm', '.mov'):
+            candidate = search_dir / f"{task_id}{ext}"
+            if candidate.exists() and candidate.stat().st_size > 1024 * 1024:  # >1MB 才认为有效
+                existing_video = candidate
+                break
+        if existing_video:
+            break
+    # 回退：模糊匹配
+    if not existing_video:
+        for search_dir in [Path(download_dir), Path(temp_dir)]:
+            for ext in ('.mp4', '.mkv', '.webm'):
+                candidates = [f for f in search_dir.glob(f"{task_id}*{ext}")
+                              if f.is_file() and f.stat().st_size > 1024 * 1024
+                              and '.part' not in f.name]
+                if candidates:
+                    candidates.sort(key=lambda f: f.stat().st_size, reverse=True)
+                    existing_video = candidates[0]
+                    break
+            if existing_video:
+                break
+
+    if existing_video:
+        write_log(f"发现已存在的视频文件: {existing_video} ({existing_video.stat().st_size / (1024*1024):.2f} MB)")
+        write_log("跳过下载，直接使用已有文件")
+        logger.info(f"[下载] 任务 {task_id}: 视频已存在，跳过下载")
+
+        # 确保文件在下载目录中
+        if str(existing_video.parent) == str(Path(download_dir).resolve()):
+            final_mp4 = existing_video
+            write_log(f"文件已在下载目录: {final_mp4}")
+        else:
+            # 从 temp_dir 移动到 download_dir
+            mp4_name = existing_video.name
+            final_mp4 = Path(download_dir) / mp4_name
+            if final_mp4.exists() and final_mp4.stat().st_size >= existing_video.stat().st_size:
+                write_log(f"下载目录已有同名文件且更大，跳过移动")
+                existing_video.unlink()
+            else:
+                try:
+                    shutil.move(str(existing_video), str(final_mp4))
+                    write_log(f"文件已移动到: {final_mp4}")
+                except Exception as e:
+                    write_log(f"移动失败: {e}，保留原位", "WARN")
+                    final_mp4 = existing_video
+
+        # 清理临时文件（仅当最终文件不在 temp_dir 时）
+        if str(final_mp4.parent) != str(Path(temp_dir).resolve()):
+            _cleanup_temp(temp_dir, task_id)
+            write_log("临时文件已清理")
+
+        update_task(task_id, status="completed", stage="completed",
+                    progress=100, file=str(final_mp4))
+        write_log(f"任务完成 - 最终文件: {final_mp4}")
+
+        # NAS 转移
+        cfg_now = get_download_config()
+        if cfg_now.get("move_to_nas", "true") == "true":
+            t = get_task(task_id)
+            if t:
+                write_log("开始 NAS 转移...")
+                update_task(task_id, stage="moving", progress=0, move_speed="", move_elapsed="")
+                from app.services.mover import move_to_media_library
+                move_to_media_library(task_id, str(final_mp4), t["name"] + ".mp4")
+                write_log("NAS 转移已启动")
+        else:
+            write_log("NAS 转移已禁用，跳过")
+
+        download_handle.set_exit_code(0)
+        log_file.close()
+        return download_handle
+
     # ffmpeg 前置检查
     if not _check_ffmpeg():
         write_log("警告: ffmpeg 未安装！分片下载后可能无法合并为 MP4", "WARN")
