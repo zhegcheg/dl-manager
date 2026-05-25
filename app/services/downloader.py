@@ -420,11 +420,20 @@ def _post_download(task_id: str, download_dir: str, temp_dir: str,
     else:
         # 移动到下载目录
         write_log(f"开始移动文件到: {download_dir}")
-        # 文件名长度保护（Windows MAX_PATH 260 字符限制）
+        # 文件名长度保护（CIFS 文件名上限 255 字节，Windows MAX_PATH 260 字符）
         mp4_name = video_path.name
-        if len(mp4_name) > 200:
-            stem = video_path.stem[:180]
-            mp4_name = stem + video_path.suffix
+        name_bytes = len(mp4_name.encode('utf-8'))
+        if name_bytes > 250 or len(mp4_name) > 200:
+            stem = video_path.stem
+            suffix = video_path.suffix
+            # 按字符截断，兼顾字节和字符长度限制
+            max_chars = min(180, len(stem))
+            while max_chars > 0:
+                test = stem[:max_chars] + suffix
+                if len(test.encode('utf-8')) <= 250 and len(test) <= 200:
+                    break
+                max_chars -= 1
+            mp4_name = stem[:max_chars] + suffix
         final_mp4 = Path(download_dir) / mp4_name
         # 防止文件名冲突
         if final_mp4.exists():

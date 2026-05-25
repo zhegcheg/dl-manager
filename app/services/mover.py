@@ -156,24 +156,22 @@ def move_to_media_library(task_id: str, file_path: str, final_name: str = None, 
 
     dest = dest_dir / dest_name
 
-    # CIFS 文件名上限约 255 字符，按字节计算
-    # 完整目标路径（含目录）不超过 240 字节，文件名部分留 220 字节安全余量
-    full_path_bytes = len(str(dest.resolve()).encode('utf-8'))
-    if full_path_bytes > 240:
-        max_name_bytes = 220  # 文件名部分最多 220 字节
+    # CIFS 文件名上限 255 字节（单个文件名组件，不含路径）
+    name_bytes = len(dest_name.encode('utf-8'))
+    if name_bytes > 250:  # 留 5 字节安全余量
         base, ext = os.path.splitext(dest_name)
-        # 按字节截断 base，确保 base + ext 总字节数在限制内
         ext_bytes = len(ext.encode('utf-8'))
-        max_base_bytes = max_name_bytes - ext_bytes
-        if max_base_bytes > 0:
-            encoded = base.encode('utf-8')
-            if len(encoded) > max_base_bytes:
-                encoded = encoded[:max_base_bytes]
-                dest_name = encoded.decode('utf-8', errors='ignore') + ext
-            else:
-                dest_name = base + ext
-        else:
-            dest_name = base[:80] + ext
+        max_base_bytes = 250 - ext_bytes
+        # 按字符逐个截断，避免破坏多字节 UTF-8 字符
+        truncated = ""
+        current_bytes = 0
+        for ch in base:
+            ch_bytes = len(ch.encode('utf-8'))
+            if current_bytes + ch_bytes > max_base_bytes:
+                break
+            truncated += ch
+            current_bytes += ch_bytes
+        dest_name = truncated + ext
         dest = dest_dir / dest_name
 
     # 启动后台复制线程
