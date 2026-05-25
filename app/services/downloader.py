@@ -10,6 +10,8 @@ import logging
 import subprocess
 import sys
 import json
+import os
+import re
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
@@ -20,6 +22,26 @@ logger = logging.getLogger("dl-manager")
 
 
 POLL_INTERVAL = 2  # DB 更新频率（秒）
+
+# ffmpeg 可用性缓存
+_ffmpeg_available: Optional[bool] = None
+
+
+def _check_ffmpeg() -> bool:
+    """检查 ffmpeg 是否可用（结果缓存）"""
+    global _ffmpeg_available
+    if _ffmpeg_available is not None:
+        return _ffmpeg_available
+    try:
+        r = subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
+        _ffmpeg_available = (r.returncode == 0)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        _ffmpeg_available = False
+    if _ffmpeg_available:
+        logger.info("[ffmpeg] 检测到 ffmpeg 可用")
+    else:
+        logger.warning("[ffmpeg] 未检测到 ffmpeg！分片下载后将无法合并为 MP4")
+    return _ffmpeg_available
 
 
 def _ts():
@@ -132,7 +154,7 @@ def _build_ytdlp_cmd(m3u8_url: str, temp_dir: str, task_id: str, thread_count: i
     """构建 yt-dlp CLI 命令"""
     python_exe = sys.executable
     cmd = [
-        python_exe, '-m', 'yt_dlp',
+        python_exe, '-u', '-m', 'yt_dlp',
         m3u8_url,
         '-o', f'{temp_dir}/{task_id}.%(ext)s',
         '--concurrent-fragments', str(thread_count),
@@ -158,12 +180,22 @@ def _build_ytdlp_cmd(m3u8_url: str, temp_dir: str, task_id: str, thread_count: i
     return cmd
 
 
+# ANSI 转义码正则（用于清理 Linux 终端控制字符）
+_ANSI_ESCAPE_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b\(B')
+
+
+def _strip_ansi(text: str) -> str:
+    """移除 ANSI 转义码"""
+    return _ANSI_ESCAPE_RE.sub('', text)
+
+
 def _monitor_and_postprocess(proc: subprocess.Popen, download_handle: DownloadThread,
                              task_id: str, m3u8_url: str, download_dir: str,
                              temp_dir: str, log_file, write_log):
     """监控 yt-dlp 子进程输出，解析进度，完成后执行文件移动和 NAS 转移"""
     last_update = 0.0
     last_log_progress = -10
+    non_json_lines = 0  # 非 JSON 行计数器，用于诊断
 
     try:
         while True:
@@ -186,7 +218,7 @@ def _monitor_and_postprocess(proc: subprocess.Popen, download_handle: DownloadTh
                 download_handle.set_exit_code(1)
                 return
 
-            line = raw_line.strip()
+            line = _strip_ansi(raw_line).strip()
             if not line:
                 continue
 
@@ -222,6 +254,11 @@ def _monitor_and_postprocess(proc: subprocess.Popen, download_handle: DownloadTh
                         write_log(f"进度: {progress:.1f}% | 速度: {speed_str} | 分片: {segments_str}")
                 except (json.JSONDecodeError, KeyError):
                     pass
+            else:
+                # 记录前几条非 JSON 行，帮助诊断输出格式问题
+                non_json_lines += 1
+                if non_json_lines <= 5:
+                    write_log(f"[yt-dlp] {line[:200]}")
 
         # 等待进程结束
         proc.wait()
@@ -235,10 +272,19 @@ def _monitor_and_postprocess(proc: subprocess.Popen, download_handle: DownloadTh
             pass  # 已处理
         else:
             error_msg = stderr_output.strip().split('\n')[-1][:200] if stderr_output else f"yt-dlp 退出码: {proc.returncode}"
-            write_log(f"下载失败: {error_msg}", "ERROR")
-            logger.error(f"[下载] 任务 {task_id} 失败: {error_msg}")
-            update_task(task_id, status="failed", stage="failed", error=f"下载失败: {error_msg}")
-            download_handle.set_exit_code(1)
+            # 检查是否有已合并的 .mp4.part 文件（yt-dlp 下载完成但 ffmpeg 合并步骤失败）
+            part_file = Path(temp_dir) / f"{task_id}.mp4.part"
+            if part_file.exists() and part_file.stat().st_size > 1024 * 1024:
+                write_log(f"yt-dlp 退出码非 0 ({proc.returncode})，但发现 .mp4.part 文件 ({part_file.stat().st_size / (1024*1024):.1f} MB)")
+                write_log(f"原始错误: {error_msg}")
+                write_log("尝试从 .mp4.part 文件恢复...")
+                update_task(task_id, progress=100, speed="", segments="", stage="merging")
+                _post_download(task_id, download_dir, temp_dir, write_log, download_handle)
+            else:
+                write_log(f"下载失败: {error_msg}", "ERROR")
+                logger.error(f"[下载] 任务 {task_id} 失败: {error_msg}")
+                update_task(task_id, status="failed", stage="failed", error=f"下载失败: {error_msg}")
+                download_handle.set_exit_code(1)
 
     except Exception as e:
         write_log(f"监控异常: {e}", "ERROR")
@@ -263,32 +309,103 @@ def _monitor_and_postprocess(proc: subprocess.Popen, download_handle: DownloadTh
 
 def _post_download(task_id: str, download_dir: str, temp_dir: str,
                    write_log, download_handle: DownloadThread):
-    """下载完成后处理：移动文件、NAS 转移"""
-    # 查找下载的 mp4 文件
-    mp4_files = list(Path(temp_dir).glob(f"{task_id}*.mp4"))
-    if not mp4_files:
-        write_log("下载完成但未找到 MP4 文件", "ERROR")
-        update_task(task_id, status="failed", stage="failed", error="下载完成但未找到 MP4 文件")
+    """下载完成后处理：查找合并文件、移动到下载目录、可选 NAS 转移"""
+    # 诊断：列出 temp_dir 中与当前任务相关的文件
+    try:
+        all_files = list(Path(temp_dir).glob(f"{task_id}*"))
+        total_size = sum(f.stat().st_size for f in all_files if f.is_file())
+        write_log(f"temp_dir 中任务文件: {len(all_files)} 个, 总计 {total_size / (1024*1024):.2f} MB")
+        # 按扩展名分组统计
+        ext_count: dict = {}
+        for f in all_files:
+            if f.is_file():
+                ext = f.suffix or '(no ext)'
+                ext_count[ext] = ext_count.get(ext, 0) + 1
+        for ext, cnt in sorted(ext_count.items(), key=lambda x: -x[1]):
+            write_log(f"  {ext}: {cnt} 个文件")
+    except Exception as e:
+        write_log(f"列出 temp_dir 失败: {e}", "WARN")
+
+    # 查找合并后的视频文件（优先 mp4 > mkv > webm）
+    video_path = None
+    for ext in ('.mp4', '.mkv', '.webm', '.mov'):
+        candidate = Path(temp_dir) / f"{task_id}{ext}"
+        if candidate.exists() and candidate.stat().st_size > 0:
+            video_path = candidate
+            break
+
+    # 回退：模糊匹配（带格式后缀如 {task_id}.f1234.mp4）
+    if not video_path:
+        for ext in ('.mp4', '.mkv', '.webm'):
+            candidates = [f for f in Path(temp_dir).glob(f"{task_id}*{ext}")
+                          if f.is_file() and f.stat().st_size > 0
+                          and '.part' not in f.name]
+            if candidates:
+                candidates.sort(key=lambda f: f.stat().st_size, reverse=True)
+                video_path = candidates[0]
+                break
+
+    # 回退：检查 .mp4.part 文件（yt-dlp 已合并但未完成最终输出）
+    if not video_path:
+        part_file = Path(temp_dir) / f"{task_id}.mp4.part"
+        if part_file.exists() and part_file.stat().st_size > 1024 * 1024:  # 大于 1MB 才认为是有效文件
+            write_log(f"发现未完成的 .mp4.part 文件 ({part_file.stat().st_size / (1024*1024):.2f} MB)，尝试 ffmpeg remux")
+            output_mp4 = Path(temp_dir) / f"{task_id}.mp4"
+            try:
+                proc = subprocess.run(
+                    ['ffmpeg', '-y', '-hide_banner', '-i', str(part_file),
+                     '-c', 'copy', '-movflags', '+faststart', str(output_mp4)],
+                    capture_output=True, text=True, timeout=600
+                )
+                if proc.returncode == 0 and output_mp4.exists() and output_mp4.stat().st_size > 0:
+                    write_log(f"remux 成功: {output_mp4.name} ({output_mp4.stat().st_size / (1024*1024):.2f} MB)")
+                    video_path = output_mp4
+                else:
+                    # remux 失败，直接重命名（大部分播放器可播放 .part 文件）
+                    write_log(f"remux 失败，直接重命名 .part 文件", "WARN")
+                    part_file.rename(output_mp4)
+                    video_path = output_mp4
+            except FileNotFoundError:
+                write_log("ffmpeg 未安装，直接重命名 .part 文件", "WARN")
+                part_file.rename(output_mp4)
+                video_path = output_mp4
+            except subprocess.TimeoutExpired:
+                write_log("ffmpeg remux 超时，直接重命名 .part 文件", "WARN")
+                if output_mp4.exists():
+                    output_mp4.unlink()
+                part_file.rename(output_mp4)
+                video_path = output_mp4
+            except Exception as e:
+                write_log(f"remux 异常: {e}，直接重命名", "WARN")
+                part_file.rename(output_mp4)
+                video_path = output_mp4
+
+    if not video_path:
+        # 检查是否只有 part-Frag 分片文件（说明 ffmpeg 合并失败）
+        part_files = list(Path(temp_dir).glob(f"{task_id}*.part-Frag*"))
+        if part_files:
+            if not _check_ffmpeg():
+                err = "下载完成但 ffmpeg 未安装，无法合并分片文件为 MP4。请安装 ffmpeg 后重试"
+            else:
+                err = f"下载完成但合并失败，temp_dir 中有 {len(part_files)} 个分片文件"
+            write_log(err, "ERROR")
+            update_task(task_id, status="failed", stage="failed", error=err)
+        else:
+            write_log("下载完成但未找到任何视频文件", "ERROR")
+            update_task(task_id, status="failed", stage="failed",
+                        error="下载完成但未找到视频文件")
         download_handle.set_exit_code(1)
         return
 
-    mp4_path = mp4_files[0]
-    write_log(f"yt-dlp 下载完成，文件: {mp4_path.name}")
-    if mp4_path.exists():
-        write_log(f"文件大小: {mp4_path.stat().st_size / (1024*1024):.2f} MB")
+    write_log(f"视频文件就绪: {video_path.name} ({video_path.stat().st_size / (1024*1024):.2f} MB)")
 
-    if mp4_path.stat().st_size == 0:
-        write_log("文件大小为 0", "ERROR")
-        update_task(task_id, status="failed", stage="failed", error="文件大小为 0")
-        download_handle.set_exit_code(1)
-        return
-
+    # 移动到下载目录
     write_log(f"开始移动文件到: {download_dir}")
     # 文件名长度保护（Windows MAX_PATH 260 字符限制）
-    mp4_name = mp4_path.name
+    mp4_name = video_path.name
     if len(mp4_name) > 200:
-        stem = mp4_path.stem[:180]
-        mp4_name = stem + mp4_path.suffix
+        stem = video_path.stem[:180]
+        mp4_name = stem + video_path.suffix
     final_mp4 = Path(download_dir) / mp4_name
     # 防止文件名冲突
     if final_mp4.exists():
@@ -299,12 +416,12 @@ def _post_download(task_id: str, download_dir: str, temp_dir: str,
             final_mp4 = Path(download_dir) / f"{stem}_{counter}{suffix}"
             counter += 1
     try:
-        shutil.move(str(mp4_path), str(final_mp4))
+        shutil.move(str(video_path), str(final_mp4))
         write_log(f"文件已移动到: {final_mp4}")
     except Exception as move_err:
         write_log(f"移动失败，回退到复制: {move_err}", "WARN")
-        shutil.copy2(str(mp4_path), str(final_mp4))
-        mp4_path.unlink()
+        shutil.copy2(str(video_path), str(final_mp4))
+        video_path.unlink()
         write_log(f"文件已复制到: {final_mp4}")
 
     _cleanup_temp(temp_dir, task_id)
@@ -313,7 +430,7 @@ def _post_download(task_id: str, download_dir: str, temp_dir: str,
                 progress=100, file=str(final_mp4))
     write_log("任务完成 - 状态已更新为 completed")
 
-    # 检查是否启用 NAS 转移
+    # 检查是否启用 NAS 转移（未启用则跳过）
     cfg_now = get_download_config()
     if cfg_now.get("move_to_nas", "true") == "true":
         t = get_task(task_id)
@@ -323,6 +440,8 @@ def _post_download(task_id: str, download_dir: str, temp_dir: str,
             from app.services.mover import move_to_media_library
             move_to_media_library(task_id, str(final_mp4), t["name"] + ".mp4")
             write_log("NAS 转移完成")
+    else:
+        write_log("NAS 转移已禁用，跳过")
 
     download_handle.set_exit_code(0)
 
@@ -394,6 +513,10 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
     write_log(f"线程数: {thread_count}")
     write_log("下载模式: 子进程（GIL 隔离）")
 
+    # ffmpeg 前置检查
+    if not _check_ffmpeg():
+        write_log("警告: ffmpeg 未安装！分片下载后可能无法合并为 MP4", "WARN")
+
     # 构建 yt-dlp 命令
     cmd = _build_ytdlp_cmd(m3u8_url, temp_dir, task_id, thread_count, headers)
     write_log(f"yt-dlp 命令: {' '.join(cmd)}")
@@ -405,7 +528,9 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
     # 注册下载
     register_download(task_id, download_handle)
 
-    # 启动 yt-dlp 子进程
+    # 启动 yt-dlp 子进程（设置 PYTHONUNBUFFERED 确保 stdout 不被缓冲）
+    env = os.environ.copy()
+    env['PYTHONUNBUFFERED'] = '1'
     try:
         proc = subprocess.Popen(
             cmd,
@@ -413,6 +538,7 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=env,
         )
         download_handle._process = proc
     except Exception as e:
