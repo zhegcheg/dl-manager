@@ -173,7 +173,7 @@
         </select>
       </div>
       <div class="row" style="margin-top:6px;">
-        <input v-model="newSource.poll_cron" placeholder="定时轮询 cron，默认 0 4 * * *（每天4点）" style="flex:2;">
+        <input v-model="newSource.poll_cron" placeholder="定时轮询 cron，默认 0 */8 * * *（每8小时）" style="flex:2;">
         <input v-model="newSource.page_url_pattern" placeholder="视频链接正则，如：href=&quot;(https://example.com/videos/[^&quot;]+)&quot;" style="flex:3;">
         <button class="btn primary" @click="addSource">添加</button>
       </div>
@@ -191,7 +191,7 @@
         <div class="info">
           <div class="name">[[ s.name ]] <span class="feed-type">[[ s.feed_type ]]</span></div>
           <div class="url">[[ s.url ]]</div>
-          <div style="color:#888;font-size:12px;margin-top:2px;">⏰ [[ s.poll_cron || '0 4 * * *' ]]</div>
+          <div style="color:#888;font-size:12px;margin-top:2px;">⏰ [[ s.poll_cron || '0 */8 * * *' ]]</div>
         </div>
         <div class="actions">
           <button class="toggle" :class="{on: s.enabled}" @click="toggleSource(s)"></button>
@@ -315,8 +315,8 @@
         </div>
         <div class="form-row">
           <label>定时轮询 (cron)</label>
-          <input v-model="editingSource.poll_cron" placeholder="0 4 * * *">
-          <div style="color:#888;font-size:12px;">格式：分 时 日 月 周。如 <code>0 4 * * *</code> = 每天4点，<code>0 */6 * * *</code> = 每6小时</div>
+          <input v-model="editingSource.poll_cron" placeholder="0 */8 * * *">
+          <div style="color:#888;font-size:12px;">格式：分 时 日 月 周。如 <code>0 */8 * * *</code> = 每8小时，<code>0 4 * * *</code> = 每天4点</div>
         </div>
         <hr style="border-color:#333;margin:12px 0;">
         <div style="color:#ff6b9d;font-size:13px;margin-bottom:8px;">🔧 解析规则（不填则使用通用规则自动识别）</div>

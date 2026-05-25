@@ -16,7 +16,7 @@ createApp({
     const schedulerConfig = ref({rss_cron: '0 4 * * *', rss_enabled: 'true'})
     const downloadConfig = ref({download_dir: '', temp_dir: '', max_concurrent: '2', thread_count: '8', move_to_nas: 'true'})
     const proxyConfig = ref({enabled: 'false', type: 'http', host: '', port: '7890'})
-    const newSource = ref({name:'', url:'', feed_type: 'webpage', poll_cron: '0 4 * * *'})
+    const newSource = ref({name:'', url:'', feed_type: 'webpage', poll_cron: '0 */8 * * *'})
     const deleteTarget = ref(null)
     const editingSource = ref(null)
     const showAddModal = ref(false)
