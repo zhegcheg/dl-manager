@@ -154,10 +154,10 @@ def move_to_media_library(task_id: str, file_path: str, final_name: str = None, 
     else:
         dest_name = src.name
 
-    # CIFS 文件名上限约 255 字符，截断到 120 安全（base+ext 都要截断）
+    # CIFS 文件名上限约 255 字符，截断到 80 安全（base+ext 都要截断）
     base, ext = os.path.splitext(dest_name)
     if len(dest_name) > 200:
-        dest_name = base[:120] + ext
+        dest_name = base[:80] + ext
 
     dest = dest_dir / dest_name
 
