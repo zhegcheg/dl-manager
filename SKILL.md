@@ -20,11 +20,11 @@ metadata:
       FastAPI :8899 (server.py → app/main.py)
            ↓
   ┌─ RSS Poller（Jable 页面抓取 + RSS 订阅轮询，APScheduler 定时）
-  ├─ yt-dlp（多线程分片下载 m3u8，断点续传，代理支持）
+  ├─ yt-dlp（子进程下载 m3u8，GIL 隔离，断点续传，代理支持）
   ├─ queue.py（优先级队列 + 并发控制 + 指数退避重试）
   ├─ merger.py（ffmpeg concat copy / re-encode 合并 TS→MP4）
   ├─ mover.py（异步复制 MP4 → NAS，dd/Python 带进度）
-  └─ events.py（SSE 事件总线，500ms 脏标记广播）
+  └─ events.py（SSE 事件总线，2s 脏标记广播）
 ```
 
 ## 服务地址
@@ -76,8 +76,8 @@ docker compose logs --tail 100 -f dl-manager
 | 功能 | 说明 |
 |------|------|
 | 📡 订阅源管理 | Jable TV 页面抓取 + 标准 RSS，自动提取 m3u8 和 AES 密钥 |
-| ⬇️ 并发队列 | 优先级队列（priority DESC, created_at ASC），可配置并发数 1-10 |
-| 📊 实时进度 | SSE 推送，百分比 + 速度 + 分片数，500ms 广播间隔 |
+| ⬇️ 并发队列 | 优先级队列（priority DESC, created_at ASC），可配置并发数 1-10，yt-dlp 子进程下载 |
+| 📊 实时进度 | SSE 推送，百分比 + 速度 + 分片数，2s 广播间隔 |
 | 🔗 自动合并 | ffmpeg concat copy（快）→ re-encode（保底），编码跳变检测 |
 | 📤 NAS 转移 | dd (Linux) / Python 原生复制 (Windows)，异步带进度 |
 | 🌐 代理支持 | HTTP / SOCKS5，用于 yt-dlp 下载和 RSS 轮询 |
@@ -94,19 +94,19 @@ docker compose logs --tail 100 -f dl-manager
 |------|------|
 | `server.py` | 入口：uvicorn 启动 FastAPI，端口 8899 |
 | `app/main.py` | FastAPI 应用工厂，生命周期管理（启动恢复+SSE广播） |
-| `app/events.py` | SSE 事件总线：mark_dirty() 标记变更，broadcast_worker 广播 |
+| `app/events.py` | SSE 事件总线：mark_dirty() 标记变更，broadcast_worker 2s 广播 |
 | `app/db/database.py` | SQLite（WAL），tasks/sources/scheduler_config/download_config/proxy_config 表 |
 | `app/routers/tasks.py` | 任务 CRUD + SSE 端点 + 日志流 + from-url/from-m3u8 创建 |
 | `app/routers/sources.py` | 订阅源 CRUD + RSS 手动触发 |
 | `app/routers/config.py` | 配置/代理/队列状态/媒体流（Range 206） |
-| `app/services/downloader.py` | yt-dlp 下载：多线程分片、代理、进度回调、DownloadThread 封装 |
+| `app/services/downloader.py` | yt-dlp 子进程下载：GIL 隔离、--progress-template JSON 解析、DownloadThread 封装 |
 | `app/services/merger.py` | ffmpeg 合并：编码跳变检测 → concat copy → re-encode 保底 |
 | `app/services/mover.py` | 异步转移：dd (Linux) / Python 复制 (Windows)，带进度汇报 |
 | `app/services/queue.py` | 优先级队列、并发控制、指数退避重试、启动恢复 cleanup_finished |
 | `app/services/rss_poller.py` | Jable 页面抓取（urllib+代理）、m3u8/AES 密钥提取、多源轮询 |
 | `app/services/scheduler.py` | APScheduler BackgroundScheduler，cron 定时 RSS |
 | `web/index.html` | Vue 3 前端：任务/订阅/设置三标签页 |
-| `web/app.js` | 前端逻辑：SSE 订阅、状态管理、API 调用 |
+| `web/app.js` | 前端逻辑：SSE 订阅、状态管理、API 调用、KiB/s 速度单位支持 |
 | `web/player.html` | 视频播放器页面 |
 
 ## API 端点速查
@@ -189,11 +189,17 @@ docker compose logs --tail 100 -f dl-manager
 
 ## 进度追踪机制
 
-基于 yt-dlp progress_hooks 回调：
-- 每秒更新一次 DB（POLL_INTERVAL=1s）
-- 提取：进度百分比、下载速度（format_speed）、分片进度（fragment_index/fragment_count）
-- SSE 广播间隔 500ms（events.py broadcast_worker）
+基于 yt-dlp `--progress-template` 输出：
+- yt-dlp 运行在独立子进程（subprocess.Popen），与主进程 GIL 完全隔离
+- 监控线程通过 `proc.stdout.readline()` 读取 JSON 进度行
+- 每 2 秒更新一次 DB（POLL_INTERVAL=2s）
+- 提取：进度百分比、下载速度、分片进度（fragment_index/fragment_count）
+- SSE 广播间隔 2s（events.py broadcast_worker）
+- 系统统计缓存 4s TTL，避免多 SSE 订阅者重复计算 psutil
 - 前端通过 `/api/tasks/events` SSE 接收实时更新
+- 速度单位支持：MB/s, KB/s（标准） + MiB/s, KiB/s, GiB/s（yt-dlp 二进制单位）
+
+> 注：`--concurrent-fragments` 仅对 DASH 多文件下载有效，HLS/m3u8 始终顺序下载分片
 
 ## Web UI 操作
 

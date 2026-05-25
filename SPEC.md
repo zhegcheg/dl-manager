@@ -6,19 +6,21 @@
 ┌──────────────────────────────────────────────────────┐
 │  Vue 3 前端 (web/)                                    │
 │  index.html (任务/订阅/设置) · player.html (播放)     │
+│  components/ (LogsView · SettingsView · SourcesView)  │
 └───────────────────────┬──────────────────────────────┘
                         │ HTTP REST + SSE
 ┌───────────────────────┴──────────────────────────────┐
 │  FastAPI 后端 (server.py → app/main.py)               │
 │                                                       │
 │  Routers: tasks · sources · config                    │
-│  Services: downloader · merger · mover · queue        │
-│            rss_poller · scheduler                     │
-│  Events: SSE 广播 (events.py)                         │
+│  Services: downloader(子进程) · merger · mover        │
+│            queue · rss_poller · scheduler             │
+│  Events: SSE 广播 (events.py, 2s 间隔)                │
 │  Storage: SQLite (database.py, WAL mode)              │
-└──────────────────────────────────────────────────────┘
+└───────────────────────┬──────────────────────────────┘
           │                    │
-    yt-dlp + ffmpeg      NAS (/mnt/fn-nas-imovie/)
+   yt-dlp (subprocess)    NAS (/mnt/fn-nas-imovie/)
+   + ffmpeg
 ```
 
 ## 任务状态机
@@ -30,7 +32,7 @@
                          │ try_start_next() (优先级排序)
                          ▼
                    ┌─────────────┐
-                   │ downloading │ ← yt-dlp 多线程分片下载
+                   │ downloading │ ← yt-dlp 子进程下载
                    └──────┬──────┘
                           │ 下载完成
                           ▼
@@ -101,27 +103,34 @@
 | `failed` | error | 失败（含错误信息） |
 | `stopped` | error | 用户暂停/停止 |
 
-## 下载流程 (yt-dlp)
+## 下载流程 (yt-dlp 子进程)
 
 ```python
 # downloader.py - start_download()
-ydl_opts = {
-    'outtmpl': '{temp_dir}/{task_id}.%(ext)s',
-    'concurrent_fragment_downloads': thread_count,  # 多线程分片
-    'continuedl': True,          # 断点续传
-    'merge_output_format': 'mp4', # 自动合并
-    'retries': 10,               # 自动重试
-    'fragment_retries': 10,      # 分片重试
-    'http_chunk_size': 10485760, # 10MB 分块
-    'progress_hooks': [hook],    # 进度回调
-}
+cmd = [
+    sys.executable, '-m', 'yt_dlp', m3u8_url,
+    '-o', f'{temp_dir}/{task_id}.%(ext)s',
+    '--concurrent-fragments', str(thread_count),
+    '--continue',                        # 断点续传
+    '--merge-output-format', 'mp4',      # 自动合并
+    '--console-title',                   # 进度条写控制台标题
+    '--retries', '10',
+    '--fragment-retries', '10',
+    '--socket-timeout', '30',
+    '--newline',
+    '--progress-template',               # JSON 进度输出到 stdout
+    'download:{"progress":"...","speed":"...","frag_idx":"...","frag_cnt":"...","eta":"..."}',
+]
+proc = subprocess.Popen(cmd, stdout=PIPE, stderr=PIPE, text=True)
 ```
 
-**流程**: temp_dir 分片下载 → yt-dlp 自动合并 MP4 → move 到 download_dir → 异步转移到 NAS
+**架构**: yt-dlp 运行在独立子进程（subprocess.Popen），与主进程 GIL 完全隔离，Web UI 不受下载影响
 
-**进度回调**: `progress_hook` 每 1 秒更新一次 DB（POLL_INTERVAL=1），提取 progress/speed/segments
+**进度解析**: 监控线程通过 `proc.stdout.readline()` 读取 JSON 进度行，每 2 秒（POLL_INTERVAL=2）更新一次 DB
 
-**代理支持**: 根据 proxy_config 自动设置 `ydl_opts['proxy']`（http/socks5）
+**代理支持**: 根据 proxy_config 设置 `ydl_opts['proxy']`（http/socks5）
+
+> 注：`--concurrent-fragments` 仅对 DASH 多文件下载有效，HLS/m3u8 始终顺序下载分片
 
 ## 合并流程 (ffmpeg)
 
@@ -191,9 +200,10 @@ RETRY_BACKOFF = [60, 300, 900]  # 1min, 5min, 15min
 
 ```
 工作线程调用 mark_dirty() → 设置脏标记
-broadcast_worker (asyncio) → 每 500ms 检查脏标记
+broadcast_worker (asyncio) → 每 2s 检查脏标记
   → 有变更: 查询全部任务列表 → 推送给所有 SSE 订阅者
   → 无变更: 跳过
+系统统计: get_system_stats() 结果缓存 4s TTL，避免多 SSE 订阅者重复计算 psutil
 SSE 端点: GET /api/tasks/events
   → 连接时立即推送一次当前列表
   → 每 15s 发送心跳保持连接
@@ -307,16 +317,19 @@ GET /api/media/{filename}
 ## 前端架构
 
 ```
-Vue 3 (CDN, 无构建) → 单页应用
+Vue 3 (CDN, 无构建) → 单页应用 + 组件化拆分
 
-三个标签页:
+三个标签页（独立组件）:
   1. 任务列表 (tasks) - 统计栏 + 筛选栏 + 卡片/列表视图 + 分页
-  2. 订阅源 (sources) - 添加/编辑/删除/启停
-  3. 设置 (settings) - 下载/调度/代理配置
+  2. 订阅源 (sources) - SourcesView.js 组件
+  3. 设置 (settings) - SettingsView.js 组件
+  日志面板: LogsView.js 组件
 
 实时通信:
   SSE (/api/tasks/events) → 任务变更自动刷新
   连接断开自动重连 (5s)
+
+速度单位: 支持 MB/s, KB/s (标准) 和 MiB/s, KiB/s, GiB/s (yt-dlp 二进制单位)
 
 添加视频弹窗:
   - Jable 模式: 输入视频页 URL → POST /api/tasks/from-url
@@ -372,6 +385,10 @@ dl-manager/
 │   ├── index.html                  # 主页面
 │   ├── app.js                      # 前端逻辑
 │   ├── style.css                   # 样式
+│   ├── components/                 # Vue 组件拆分
+│   │   ├── LogsView.js             # 日志面板
+│   │   ├── SettingsView.js         # 设置面板
+│   │   └── SourcesView.js          # 订阅源面板
 │   └── player.html                 # 播放器
 ├── Dockerfile
 ├── docker-compose.yml
