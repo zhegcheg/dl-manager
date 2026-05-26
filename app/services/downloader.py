@@ -28,18 +28,24 @@ _ffmpeg_available: Optional[bool] = None
 
 
 def _check_ffmpeg() -> bool:
-    """检查 ffmpeg 是否可用（结果缓存）"""
+    """检查 ffmpeg 是否可用（结果缓存，支持 Windows 常见安装路径自动检测）"""
     global _ffmpeg_available
     if _ffmpeg_available is not None:
         return _ffmpeg_available
-    try:
-        r = subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
-        _ffmpeg_available = (r.returncode == 0)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        _ffmpeg_available = False
-    if _ffmpeg_available:
-        logger.info("[ffmpeg] 检测到 ffmpeg 可用")
+    
+    ffmpeg_path = _get_ffmpeg_path()
+    if ffmpeg_path:
+        try:
+            r = subprocess.run([ffmpeg_path, '-version'], capture_output=True, timeout=5)
+            _ffmpeg_available = (r.returncode == 0)
+            if _ffmpeg_available:
+                logger.info(f"[ffmpeg] 检测到 ffmpeg 可用: {ffmpeg_path}")
+        except Exception:
+            _ffmpeg_available = False
     else:
+        _ffmpeg_available = False
+    
+    if not _ffmpeg_available:
         logger.warning("[ffmpeg] 未检测到 ffmpeg！分片下载后将无法合并为 MP4")
     return _ffmpeg_available
 
@@ -149,6 +155,29 @@ def format_speed(speed: float) -> str:
     return f"{speed:.2f}B/s"
 
 
+def _get_ffmpeg_path() -> Optional[str]:
+    """获取 ffmpeg 可执行文件路径（支持 Windows 常见安装路径）"""
+    # 首先尝试 PATH 中的 ffmpeg
+    ffmpeg_exe = shutil.which('ffmpeg')
+    if ffmpeg_exe:
+        return ffmpeg_exe
+    
+    # Windows 下尝试常见安装路径
+    if os.name == 'nt':
+        common_paths = [
+            r"C:\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+            r"D:\Program Files\ffmpeg\bin\ffmpeg.exe",
+            r"C:\ProgramData\chocolatey\bin\ffmpeg.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-full_build\bin\ffmpeg.exe"),
+        ]
+        for path in common_paths:
+            if os.path.isfile(path):
+                return path
+    
+    return None
+
+
 def _build_ytdlp_cmd(m3u8_url: str, temp_dir: str, task_id: str, thread_count: int,
                      headers: str = "") -> list:
     """构建 yt-dlp CLI 命令"""
@@ -165,9 +194,16 @@ def _build_ytdlp_cmd(m3u8_url: str, temp_dir: str, task_id: str, thread_count: i
         '--fragment-retries', '10',
         '--socket-timeout', '30',
         '--newline',
+        '--no-warnings',  # 抑制 WARNING 输出，避免干扰 JSON 进度解析
         '--progress-template',
         'download:{"progress":"%(progress._percent_str)s","speed":"%(progress._speed_str)s","frag_idx":"%(progress.fragment_index)s","frag_cnt":"%(progress._total_frags)s","eta":"%(progress._eta_str)s"}',
     ]
+    
+    # 如果找到 ffmpeg，指定其位置（帮助 yt-dlp 找到 ffmpeg 和 ffprobe）
+    ffmpeg_path = _get_ffmpeg_path()
+    if ffmpeg_path:
+        cmd.extend(['--ffmpeg-location', os.path.dirname(ffmpeg_path)])
+    
     if headers:
         try:
             for line in headers.split('\n'):
@@ -360,7 +396,7 @@ def _post_download(task_id: str, download_dir: str, temp_dir: str,
     # 回退：检查 .mp4.part 文件（yt-dlp 已合并但未完成最终输出）
     if not video_path:
         part_file = Path(temp_dir) / f"{task_id}.mp4.part"
-        if part_file.exists() and part_file.stat().st_size > 1024 * 1024:  # 大于 1MB 才认为是有效文件
+        if part_file.exists() and part_file.stat().st_size > 50 * 1024 * 1024:  # 大于 50MB 才认为是有效文件
             write_log(f"发现未完成的 .mp4.part 文件 ({part_file.stat().st_size / (1024*1024):.2f} MB)，尝试 ffmpeg remux")
             output_mp4 = Path(temp_dir) / f"{task_id}.mp4"
             try:

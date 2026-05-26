@@ -225,7 +225,8 @@ def cleanup_finished():
         # 下载中 → 重置为 waiting（进程已死，yt-dlp 支持断点续传）
         if t["status"] == "downloading":
             update_task(tid, status="waiting", stage="waiting", progress=0,
-                       speed="", segments="", error="")
+                       speed="", segments="", error="",
+                       retry_count=0, retry_after="")
             logger.info(f"[恢复] {tid}: 下载中断 → 重置为 waiting（将通过 try_start_next 自动续传）")
         
         # 转移中且已完成复制（move_speed=done）→ 检查 final_path 并标记完成

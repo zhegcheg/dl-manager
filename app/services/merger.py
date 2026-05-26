@@ -85,11 +85,13 @@ def _do_concat_copy(seg_dir: Path, ts_files: list, task_id: str, output_path: Pa
     if core.exists():
         core.unlink()
 
-    # 写 concat list
+    # 写 concat list（Windows 路径用正斜杠，避免 ffmpeg concat demuxer 解析问题）
     concat_list = seg_dir / "concat_list.txt"
-    with open(concat_list, 'w') as f:
+    with open(concat_list, 'w', encoding='utf-8') as f:
         for ts in ts_files:
-            f.write(f"file '{ts.resolve()}'\n")
+            # ffmpeg concat 需要正斜杠或双反斜杠，这里统一用正斜杠
+            path_str = str(ts.resolve()).replace('\\', '/')
+            f.write(f"file '{path_str}'\n")
 
     update_task(task_id, progress=0, stage="merging")
 
@@ -132,11 +134,12 @@ def _do_concat_copy(seg_dir: Path, ts_files: list, task_id: str, output_path: Pa
 
 def _do_reencode(seg_dir: Path, ts_files: list, task_id: str, output_path: Path) -> tuple[bool, str]:
     """策略2：re-encode (libx264+aac)，返回 (成功, 错误信息)"""
-    # 重新写 concat list
+    # 重新写 concat list（Windows 路径用正斜杠）
     concat_list = seg_dir / "concat_list.txt"
-    with open(concat_list, 'w') as f:
+    with open(concat_list, 'w', encoding='utf-8') as f:
         for ts in ts_files:
-            f.write(f"file '{ts.resolve()}'\n")
+            path_str = str(ts.resolve()).replace('\\', '/')
+            f.write(f"file '{path_str}'\n")
 
     update_task(task_id, progress=0, stage="merging_reencode")
 

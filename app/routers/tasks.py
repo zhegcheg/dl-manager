@@ -357,7 +357,7 @@ def batch_retry_tasks(body: BatchTaskRequest):
     }
 
 
-@router.delete("/api/tasks/batch/delete")
+@router.post("/api/tasks/batch/delete")
 def batch_delete_tasks(body: BatchTaskRequest):
     """批量删除任务"""
     from app.services.queue import is_downloading as qm_is_running, unregister_download, _running
@@ -569,10 +569,16 @@ def remove_task(task_id: str):
         unregister_download(task_id)
     task_dir = get_task_dir(task_id)
     if task_dir.exists():
-        shutil.rmtree(task_dir)
+        try:
+            shutil.rmtree(task_dir)
+        except Exception:
+            pass
     flat_mp4 = Path(get_download_config().get("download_dir", "")) / f"{task_id}.mp4"
     if flat_mp4.exists():
-        flat_mp4.unlink()
+        try:
+            flat_mp4.unlink()
+        except Exception:
+            pass
     # 清理 temp_dir 中的残留
     cfg = get_download_config()
     temp_dir = cfg.get("temp_dir", "")
@@ -587,7 +593,10 @@ def remove_task(task_id: str):
                 pass
     log_path = get_task_log_path(task_id)
     if log_path.exists():
-        log_path.unlink()
+        try:
+            log_path.unlink()
+        except Exception:
+            pass
     delete_task(task_id)
     return {"message": "Deleted"}
 

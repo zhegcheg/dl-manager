@@ -245,14 +245,18 @@ createApp({
       batchLoading.value = true
       try {
         const res = await fetch('/api/tasks/batch/delete', {
-          method: 'DELETE',
+          method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ids: selected.value})
         })
         const data = await res.json()
-        console.log('批量删除:', data)
+        if (!res.ok) {
+          alert('批量删除失败: ' + (data.detail || data.message || res.status))
+        } else if (data.failed && data.failed.length > 0) {
+          alert(`批量删除完成：成功 ${data.success.length} 个，失败 ${data.failed.length} 个`)
+        }
       } catch(e) {
-        console.error('批量删除失败:', e)
+        alert('批量删除失败: ' + (e.message || e))
       }
       selected.value = []
       batchLoading.value = false
@@ -495,7 +499,17 @@ createApp({
       if (['downloading','merging','moving'].includes(t.stage)) {
         await fetch(`/api/tasks/${t.id}/stop`, {method:'POST'}).catch(()=>{})
       }
-      await fetch(`/api/tasks/${t.id}`, {method:'DELETE'}).catch(()=>{})
+      try {
+        const res = await fetch(`/api/tasks/${t.id}`, {method:'DELETE'})
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}))
+          alert('删除失败: ' + (d.detail || d.message || res.status))
+          return
+        }
+      } catch(e) {
+        alert('删除失败: ' + (e.message || e))
+        return
+      }
       await fetchTasks()
     }
 
