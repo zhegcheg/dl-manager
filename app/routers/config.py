@@ -48,6 +48,8 @@ def get_config():
     download = get_download_config()
     proxy = get_proxy_config()
     log = get_log_config()
+    # 追加环境变量（前端显示用，不写入 DB）
+    download["nas_media_dir"] = os.getenv("NAS_MEDIA_DIR", "/mnt/fn-nas-imovie")
     return {"data": {**scheduler, **download, **proxy, **log}}
 
 
