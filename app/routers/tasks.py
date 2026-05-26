@@ -143,9 +143,6 @@ async def stream_system_stats():
             await asyncio.sleep(5)
     return StreamingResponse(generate(), media_type="text/event-stream")
 
-running_procs = {}  # legacy, keep for manual stop
-
-
 class TaskCreate(BaseModel):
     id: str
     name: str
@@ -199,6 +196,34 @@ def get_tasks(status: Optional[str] = None):
 
 class BatchTaskRequest(BaseModel):
     ids: list[str]
+
+
+class FromUrlRequest(BaseModel):
+    url: str = ""
+    video_url: str = ""
+    download_dir: str = ""
+    referer: str = ""
+    headers: str = ""
+    title_selector: str = ""
+    m3u8_selector: str = ""
+    video_id_pattern: str = ""
+    key_selector: str = ""
+    iv_selector: str = ""
+
+
+class FromM3u8Request(BaseModel):
+    m3u8_url: str = ""
+    url: str = ""
+    name: str = ""
+    id: str = ""
+    headers: str = ""
+    key: str = ""
+    iv: str = ""
+    download_dir: str = ""
+
+
+class UpdateTaskRequest(BaseModel):
+    priority: Optional[int] = None
 
 
 @router.post("/api/tasks/batch/start")
@@ -403,20 +428,20 @@ def create_new_task(body: TaskCreate):
 
 
 @router.post("/api/tasks/from-url")
-def create_task_from_url(body: dict):
+def create_task_from_url(body: FromUrlRequest):
     """只提供 video_url，自动抓取页面标题和 m3u8，生成任务"""
     from app.services.rss_poller import resolve_video_info
-    video_url = body.get("url") or body.get("video_url")
+    video_url = body.url or body.video_url
     if not video_url:
         raise HTTPException(400, "url or video_url required")
-    download_dir = body.get("download_dir", "")
 
     # 支持传入解析规则（可选），用于通用网页解析
     source_config = {}
     for key in ["referer", "headers", "title_selector", "m3u8_selector",
                 "video_id_pattern", "key_selector", "iv_selector"]:
-        if body.get(key):
-            source_config[key] = body[key]
+        val = getattr(body, key, "")
+        if val:
+            source_config[key] = val
 
     import traceback
     try:
@@ -428,33 +453,28 @@ def create_task_from_url(body: dict):
         raise HTTPException(502, f"无法从页面提取 m3u8: {video_url}")
     task = create_task(info["id"], info["name"], info["m3u8_url"],
                        info.get("headers", ""), info.get("key", ""), info.get("iv", ""),
-                       download_dir=download_dir, video_url=video_url)
+                       download_dir=body.download_dir, video_url=video_url)
     try_start_next()
     return {"data": [task]}
 
 
 @router.post("/api/tasks/from-m3u8")
-def create_task_from_m3u8(body: dict):
+def create_task_from_m3u8(body: FromM3u8Request):
     """直接提供 m3u8 URL 创建任务，无需解析页面"""
     import uuid
-    m3u8_url = body.get("m3u8_url") or body.get("url")
+    m3u8_url = body.m3u8_url or body.url
     if not m3u8_url:
         raise HTTPException(400, "m3u8_url required")
-    name = body.get("name", "").strip()
+    name = body.name.strip()
     if not name:
-        # 从 URL 提取名称
         from urllib.parse import urlparse
         parsed = urlparse(m3u8_url)
         path_parts = parsed.path.strip('/').split('/')
         name = path_parts[-1].replace('.m3u8', '') if path_parts else str(uuid.uuid4())[:8]
-    task_id = body.get("id", "").strip()
+    task_id = body.id.strip()
     if not task_id:
         task_id = str(uuid.uuid4())[:12]
-    headers = body.get("headers", "")
-    key = body.get("key", "")
-    iv = body.get("iv", "")
-    download_dir = body.get("download_dir", "")
-    task = create_task(task_id, name, m3u8_url, headers, key, iv, download_dir=download_dir)
+    task = create_task(task_id, name, m3u8_url, body.headers, body.key, body.iv, download_dir=body.download_dir)
     try_start_next()
     return {"data": [task]}
 
@@ -647,20 +667,16 @@ def start_waiting_tasks():
 
 
 @router.patch("/api/tasks/{task_id}")
-def update_task_info(task_id: str, body: dict):
+def update_task_info(task_id: str, body: UpdateTaskRequest):
     """更新任务信息（目前支持优先级）"""
     task = get_task(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
 
     updates = {}
-    if "priority" in body:
-        try:
-            priority = int(body["priority"])
-            priority = max(-100, min(100, priority))
-            updates["priority"] = priority
-        except ValueError:
-            raise HTTPException(400, "priority must be a number")
+    if body.priority is not None:
+        priority = max(-100, min(100, body.priority))
+        updates["priority"] = priority
 
     if not updates:
         raise HTTPException(400, "No valid fields to update")

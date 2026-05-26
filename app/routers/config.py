@@ -4,9 +4,11 @@
 import os
 import os as _os
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
 
 from app.db.database import (
     get_task, list_tasks, update_task,
@@ -19,6 +21,40 @@ from app.services.queue import get_active_downloads, apply_max_concurrent
 from app.services.scheduler import reschedule
 
 router = APIRouter()
+
+
+class BatchConfigRequest(BaseModel):
+    download_dir: Optional[str] = None
+    temp_dir: Optional[str] = None
+    max_concurrent: Optional[str] = None
+    thread_count: Optional[str] = None
+    move_to_nas: Optional[str] = None
+    nas_dest_dir: Optional[str] = None
+    rss_cron: Optional[str] = None
+    rss_enabled: Optional[str] = None
+
+
+class ApplyConfigRequest(BaseModel):
+    max_concurrent: Optional[int] = None
+    thread_count: Optional[int] = None
+    download_dir: Optional[str] = None
+    temp_dir: Optional[str] = None
+    move_to_nas: Optional[str] = None
+    nas_dest_dir: Optional[str] = None
+
+
+class ProxyConfigRequest(BaseModel):
+    enabled: Optional[str] = None
+    type: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+
+class LogConfigRequest(BaseModel):
+    log_level: Optional[str] = None
+    log_path: Optional[str] = None
 
 
 # ── 健康检查 ──
@@ -64,61 +100,52 @@ def post_config(key: str, value: str):
 
 
 @router.post("/api/config/batch")
-def batch_update_config(body: dict):
+def batch_update_config(body: BatchConfigRequest):
     """批量更新多个配置项（用于保存按钮）"""
     results = {}
-    for key in ("download_dir", "temp_dir", "max_concurrent", "thread_count", "move_to_nas", "nas_dest_dir", "rss_cron", "rss_enabled"):
-        if key in body:
-            value = str(body[key]).strip()
-            if key in ("max_concurrent", "thread_count"):
-                try:
-                    v = int(value)
-                    if key == "max_concurrent":
-                        v = max(1, min(99, v))
-                    elif key == "thread_count":
-                        v = max(1, min(16, v))
-                    value = str(v)
-                except ValueError:
-                    results[key] = "invalid number"
-                    continue
-            if key in ("rss_cron", "rss_enabled"):
-                set_scheduler_config(key, value)
-                if key == "rss_cron":
-                    reschedule()
-            else:
-                set_download_config(key, value)
-            results[key] = value
+    data = body.model_dump(exclude_none=True)
+    for key, value in data.items():
+        value = str(value).strip()
+        if key in ("max_concurrent", "thread_count"):
+            try:
+                v = int(value)
+                if key == "max_concurrent":
+                    v = max(1, min(99, v))
+                elif key == "thread_count":
+                    v = max(1, min(16, v))
+                value = str(v)
+            except ValueError:
+                results[key] = "invalid number"
+                continue
+        if key in ("rss_cron", "rss_enabled"):
+            set_scheduler_config(key, value)
+            if key == "rss_cron":
+                reschedule()
+        else:
+            set_download_config(key, value)
+        results[key] = value
     return {"message": "Updated", "data": results}
 
 
 @router.post("/api/config/apply")
-def apply_config(body: dict):
+def apply_config(body: ApplyConfigRequest):
     """批量更新配置并动态调整运行中的任务"""
     results = {}
     stopped = 0
-    for key in ("max_concurrent", "thread_count", "download_dir", "temp_dir", "move_to_nas", "nas_dest_dir"):
-        if key in body:
-            value = str(body[key]).strip()
-            if key == "max_concurrent":
-                try:
-                    v = max(1, min(99, int(value)))
-                    value = str(v)
-                    set_download_config(key, value)
-                    stopped = apply_max_concurrent(v)
-                except ValueError:
-                    results[key] = "invalid"
-                    continue
-            elif key == "thread_count":
-                try:
-                    v = max(1, min(16, int(value)))
-                    value = str(v)
-                    set_download_config(key, value)
-                except ValueError:
-                    results[key] = "invalid"
-                    continue
-            else:
-                set_download_config(key, value)
-            results[key] = value
+    data = body.model_dump(exclude_none=True)
+    if "max_concurrent" in data:
+        v = max(1, min(99, data["max_concurrent"]))
+        set_download_config("max_concurrent", str(v))
+        stopped = apply_max_concurrent(v)
+        results["max_concurrent"] = str(v)
+    if "thread_count" in data:
+        v = max(1, min(16, data["thread_count"]))
+        set_download_config("thread_count", str(v))
+        results["thread_count"] = str(v)
+    for key in ("download_dir", "temp_dir", "move_to_nas", "nas_dest_dir"):
+        if key in data:
+            set_download_config(key, str(data[key]))
+            results[key] = str(data[key])
     msg = "已保存"
     if stopped > 0:
         msg += f"，已停止 {stopped} 个任务以适配新限制"
@@ -132,28 +159,28 @@ def get_proxy():
 
 
 @router.post("/api/proxy")
-def save_proxy(body: dict):
+def save_proxy(body: ProxyConfigRequest):
     """保存代理配置"""
     results = {}
-    for key in ("enabled", "type", "host", "port", "username", "password"):
-        if key in body:
-            value = str(body[key]).strip()
-            if key == "enabled":
-                value = "true" if value.lower() in ("true", "1", "on") else "false"
-            elif key == "type":
-                if value not in ("http", "socks5"):
-                    value = "http"
-            elif key == "port":
-                try:
-                    port = int(value)
-                    if not (1 <= port <= 65535):
-                        port = 7890
-                    value = str(port)
-                except ValueError:
-                    results[key] = "invalid"
-                    continue
-            set_proxy_config(key, value)
-            results[key] = value
+    data = body.model_dump(exclude_none=True)
+    for key, value in data.items():
+        value = str(value).strip()
+        if key == "enabled":
+            value = "true" if value.lower() in ("true", "1", "on") else "false"
+        elif key == "type":
+            if value not in ("http", "socks5"):
+                value = "http"
+        elif key == "port":
+            try:
+                port = int(value)
+                if not (1 <= port <= 65535):
+                    port = 7890
+                value = str(port)
+            except ValueError:
+                results[key] = "invalid"
+                continue
+        set_proxy_config(key, value)
+        results[key] = value
     return {"message": "已保存", "data": results}
 
 
@@ -164,32 +191,32 @@ def get_log_config_api():
 
 
 @router.post("/api/log-config")
-def save_log_config(body: dict):
+def save_log_config(body: LogConfigRequest):
     """保存日志配置"""
     results = {}
-    for key in ("log_level", "log_path"):
-        if key in body:
-            value = str(body[key]).strip()
-            if key == "log_level":
-                valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR"]
-                if value.upper() in valid_levels:
-                    value = value.upper()
-                else:
-                    value = "INFO"
-            set_log_config(key, value)
-            results[key] = value
+    data = body.model_dump(exclude_none=True)
+    for key, value in data.items():
+        value = str(value).strip()
+        if key == "log_level":
+            valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR"]
+            if value.upper() in valid_levels:
+                value = value.upper()
+            else:
+                value = "INFO"
+        set_log_config(key, value)
+        results[key] = value
     
     # 动态更新日志级别和文件输出
-    if "log_level" in body or "log_path" in body:
+    if "log_level" in data or "log_path" in data:
         try:
             import app.main
-            log_level = body.get("log_level", "INFO").upper()
-            log_path = body.get("log_path", "")
+            log_level = data.get("log_level", "INFO").upper()
+            log_path = data.get("log_path", "")
             if log_path:
                 app.main.setup_file_handler(log_path, log_level)
             else:
                 app.main.update_log_level(log_level)
-        except Exception as e:
+        except Exception:
             pass
     
     return {"message": "已保存", "data": results}

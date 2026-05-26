@@ -5,7 +5,7 @@
 import shutil
 from pathlib import Path
 
-OLD_DIR = Path.home() / ".dl-manager"
+OLD_DIR = Path.home() / ".jable-dl-server"
 NEW_DIR = Path.home() / ".dl-manager"
 
 
