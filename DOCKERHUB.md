@@ -12,15 +12,13 @@ docker run -d --name dl-manager \
   -v ~/dl-manager/tasks:/app/tasks \
   -v ~/.dl-manager:/root/.dl-manager \
   -v /mnt/nas:/mnt/nas \
+  -e DOWNLOAD_DIR=/app/tasks \
   -e NAS_MEDIA_DIR=/mnt/nas \
   -e TZ=Asia/Shanghai \
   zhegcheg/dl-manager:latest
 ```
 
-自定义端口（默认 8899）：
-```bash
-docker run ... -e PORT=9900 ...
-```
+> 环境变量优先于数据库配置。设置 env var 后，页面设置中将自动填入对应值。
 
 ## 主要功能
 
@@ -39,11 +37,17 @@ docker run ... -e PORT=9900 ...
 
 ## 配置参数
 
+**优先级：环境变量 > 数据库 > 硬编码默认值**
+
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `PORT` | 服务端口 | `8899` |
+| `DOWNLOAD_DIR` | 下载任务目录（容器内路径） | `/root/.dl-manager/tasks` |
+| `TEMP_DIR` | 临时文件目录（容器内路径） | `DOWNLOAD_DIR/temp` |
+| `NAS_MEDIA_DIR` | NAS 转移目标路径（容器内路径） | `/mnt/fn-nas-imovie` |
 | `TZ` | 时区 | `Asia/Shanghai` |
-| `NAS_MEDIA_DIR` | NAS 挂载点（容器内路径） | `/mnt/nas` |
+
+设置环境变量后，对应配置项会自动填入设置页面，以 Docker volume 挂载路径为准，确保写入正确的卷。
 
 ## 数据持久化
 

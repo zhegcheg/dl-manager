@@ -511,6 +511,16 @@ def get_download_config() -> dict:
     result = defaults.copy()
     for r in rows:
         result[r["key"]] = r["value"]
+    # 环境变量 > DB > 硬编码默认值
+    if os.getenv("DOWNLOAD_DIR"):
+        result["download_dir"] = os.getenv("DOWNLOAD_DIR")
+    if os.getenv("TEMP_DIR"):
+        result["temp_dir"] = os.getenv("TEMP_DIR")
+    elif os.getenv("DOWNLOAD_DIR") and "temp_dir" not in [r["key"] for r in rows]:
+        # DOWNLOAD_DIR 已设置且 temp_dir 无 DB 值时，自动设为 download_dir/temp
+        result["temp_dir"] = os.path.join(os.getenv("DOWNLOAD_DIR"), "temp")
+    if os.getenv("NAS_MEDIA_DIR"):
+        result["nas_dest_dir"] = os.getenv("NAS_MEDIA_DIR")
     return result
 
 def set_download_config(key: str, value: str):

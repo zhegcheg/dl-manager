@@ -16,5 +16,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - PORT=8899
-      # NAS 媒体目录路径（容器内路径，需与 volumes 挂载对应）
+      # 容器内路径（环境变量优先于 DB 默认值）
+      - DOWNLOAD_DIR=/app/tasks
+      - TEMP_DIR=/app/tasks/temp
       - NAS_MEDIA_DIR=/mnt/fn-nas-imovie
