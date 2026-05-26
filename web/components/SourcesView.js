@@ -54,17 +54,25 @@ const SourcesView = {
   `,
   data() {
     return {
-      localNewSource: {...this.newSource}
+      localNewSource: {...this.newSource},
+      _internalChange: false
     }
   },
   watch: {
     'localNewSource': {
       deep: true,
-      handler(val) { this.$emit('update:newSource', val) }
+      handler(val) {
+        if (this._internalChange) return
+        this.$emit('update:newSource', val)
+      }
     },
     newSource: {
       deep: true,
-      handler(val) { this.localNewSource = {...val} }
+      handler(val) {
+        this._internalChange = true
+        this.localNewSource = {...val}
+        this.$nextTick(() => { this._internalChange = false })
+      }
     }
   }
 };
