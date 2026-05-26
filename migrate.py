@@ -1,5 +1,5 @@
 """
-数据迁移脚本：.dl-manager → .dl-manager（跨版本兼容）
+数据迁移脚本：.jable-dl-server → .dl-manager（跨版本兼容）
 运行一次即可：python migrate.py
 """
 import shutil
