@@ -7,6 +7,7 @@ APScheduler 调度器：每个订阅源独立的定时轮询
 import threading
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.jobstores.base import JobLookupError
 from app.db.database import list_sources, get_source
 
 scheduler = BackgroundScheduler()
@@ -105,7 +106,10 @@ def refresh_source_job(source_id: int):
     if not scheduler.running:
         return
     job_id = _source_job_id(source_id)
-    scheduler.remove_job(job_id, quiet=True)
+    try:
+        scheduler.remove_job(job_id)
+    except JobLookupError:
+        pass
 
     source = get_source(source_id)
     if source and source.get("enabled"):
@@ -117,7 +121,10 @@ def remove_source_job(source_id: int):
     if not scheduler.running:
         return
     job_id = _source_job_id(source_id)
-    scheduler.remove_job(job_id, quiet=True)
+    try:
+        scheduler.remove_job(job_id)
+    except JobLookupError:
+        pass
 
 
 def refresh_all_jobs():
@@ -127,7 +134,10 @@ def refresh_all_jobs():
     # 移除所有现有源 job
     for job in scheduler.get_jobs():
         if job.id.startswith(_JOB_PREFIX):
-            scheduler.remove_job(job.id, quiet=True)
+            try:
+                scheduler.remove_job(job.id)
+            except JobLookupError:
+                pass
     # 重新添加
     sources = list_sources(enabled_only=True)
     for src in sources:
