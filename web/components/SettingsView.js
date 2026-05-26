@@ -53,10 +53,16 @@ const SettingsView = {
               <span class="form-hint">下载完成后自动复制到 NAS</span>
             </label>
             <div class="toggle-row">
-              <span class="toggle-path">{{ downloadConfig.nas_media_dir || '/mnt/fn-nas-imovie' }}/</span>
               <button class="toggle" :class="{on: downloadConfig.move_to_nas==='true'}" @click="downloadConfig.move_to_nas = downloadConfig.move_to_nas==='true' ? 'false' : 'true'"></button>
               <span class="toggle-status" :style="{color: downloadConfig.move_to_nas==='true' ? '#4ade80' : '#888'}">{{ downloadConfig.move_to_nas==='true' ? '已启用' : '已关闭' }}</span>
             </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">
+              NAS 转移路径
+              <span class="form-hint">完成后视频复制到此目录</span>
+            </label>
+            <input v-model="downloadConfig.nas_dest_dir" placeholder="/mnt/fn-nas-imovie" class="form-input">
           </div>
         </div>
         <div class="card-footer">

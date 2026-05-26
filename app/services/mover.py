@@ -14,6 +14,17 @@ from app.db.database import get_download_config
 
 MEDIA_DIR = Path(os.getenv("NAS_MEDIA_DIR", "/mnt/fn-nas-imovie"))
 
+def _get_media_dir():
+    """运行时从 DB 读取 NAS 转移路径，fallback 到环境变量"""
+    try:
+        cfg = get_download_config()
+        dest = cfg.get("nas_dest_dir", "").strip()
+        if dest:
+            return Path(dest)
+    except Exception:
+        pass
+    return MEDIA_DIR
+
 def _cleanup_source_file(task_id: str):
     """转移完成后清理源文件和空的订阅源子目录"""
     t = get_task(task_id)
@@ -156,7 +167,7 @@ def move_to_media_library(task_id: str, file_path: str, final_name: str = None, 
     if not src.exists():
         return False, f"Source file not found: {file_path}"
 
-    dest_dir = MEDIA_DIR
+    dest_dir = _get_media_dir()
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     if final_name:

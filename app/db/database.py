@@ -1,6 +1,7 @@
 """
 SQLite 任务状态管理
 """
+import os
 import re
 import sqlite3
 import time
@@ -502,6 +503,7 @@ def get_download_config() -> dict:
         "max_concurrent": "2",
         "thread_count": "8",
         "move_to_nas": "true",
+        "nas_dest_dir": os.getenv("NAS_MEDIA_DIR", "/mnt/fn-nas-imovie"),
     }
     conn = get_db()
     rows = conn.execute("SELECT * FROM download_config").fetchall()

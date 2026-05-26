@@ -58,7 +58,7 @@ def post_config(key: str, value: str):
     if key in ("rss_cron", "rss_enabled"):
         set_scheduler_config(key, value)
         reschedule()
-    elif key in ("download_dir", "temp_dir", "max_concurrent", "thread_count", "move_to_nas"):
+    elif key in ("download_dir", "temp_dir", "max_concurrent", "thread_count", "move_to_nas", "nas_dest_dir"):
         set_download_config(key, value)
     return {"message": "Updated", "key": key, "value": value}
 
@@ -67,7 +67,7 @@ def post_config(key: str, value: str):
 def batch_update_config(body: dict):
     """批量更新多个配置项（用于保存按钮）"""
     results = {}
-    for key in ("download_dir", "temp_dir", "max_concurrent", "thread_count", "move_to_nas", "rss_cron", "rss_enabled"):
+    for key in ("download_dir", "temp_dir", "max_concurrent", "thread_count", "move_to_nas", "nas_dest_dir", "rss_cron", "rss_enabled"):
         if key in body:
             value = str(body[key]).strip()
             if key in ("max_concurrent", "thread_count"):
@@ -96,7 +96,7 @@ def apply_config(body: dict):
     """批量更新配置并动态调整运行中的任务"""
     results = {}
     stopped = 0
-    for key in ("max_concurrent", "thread_count", "download_dir", "temp_dir", "move_to_nas"):
+    for key in ("max_concurrent", "thread_count", "download_dir", "temp_dir", "move_to_nas", "nas_dest_dir"):
         if key in body:
             value = str(body[key]).strip()
             if key == "max_concurrent":
