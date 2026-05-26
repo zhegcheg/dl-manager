@@ -154,7 +154,7 @@ def try_start_next() -> int:
         except Exception as e:
             # 启动失败，标记为失败并继续
             update_task(task["id"], status="failed", stage="failed", error=f"启动下载失败: {e}")
-            print(f"[try_start_next] Failed to start {task['id']}: {e}")
+            logger.error(f"[try_start_next] Failed to start {task['id']}: {e}")
             continue
 
     return started
@@ -226,39 +226,39 @@ def cleanup_finished():
         if t["status"] == "downloading":
             update_task(tid, status="waiting", stage="waiting", progress=0,
                        speed="", segments="", error="")
-            print(f"[恢复] {tid}: 下载中断 → 重置为 waiting（将通过 try_start_next 自动续传）")
+            logger.info(f"[恢复] {tid}: 下载中断 → 重置为 waiting（将通过 try_start_next 自动续传）")
         
         # 转移中且已完成复制（move_speed=done）→ 检查 final_path 并标记完成
         elif t["stage"] == "moving" and t.get("move_speed") == "done":
             fp = t.get("final_path", "")
             if fp and Path(fp).exists():
                 update_task(tid, stage="completed", progress=100)
-                print(f"[恢复] {tid}: 转移已完成，标记完成")
+                logger.info(f"[恢复] {tid}: 转移已完成，标记完成")
             else:
                 # final_path 不存在，尝试从 download_dir 重新转移
                 need_recover.append(("move", t))
-                print(f"[恢复] {tid}: 转移标记完成但目标文件缺失，加入重新转移队列")
+                logger.warning(f"[恢复] {tid}: 转移标记完成但目标文件缺失，加入重新转移队列")
         
         # 转移中（未完成）→ 加入恢复队列
         elif t["stage"] == "moving":
             need_recover.append(("move", t))
-            print(f"[恢复] {tid}: 转移中断，加入恢复队列")
+            logger.warning(f"[恢复] {tid}: 转移中断，加入恢复队列")
         
         # 合并中（含 re-encode）→ 加入恢复队列
         elif t["stage"] in ("merging", "merging_reencode"):
             need_recover.append(("merge", t))
-            print(f"[恢复] {tid}: 合并中断(stage={t['stage']})，加入恢复队列")
+            logger.warning(f"[恢复] {tid}: 合并中断(stage={t['stage']})，加入恢复队列")
         
         # 合并失败 → 也尝试恢复
         elif t["status"] == "failed" and "合并" in t.get("error", ""):
             need_recover.append(("merge", t))
-            print(f"[恢复] {tid}: 合并失败，加入恢复队列重试")
+            logger.info(f"[恢复] {tid}: 合并失败，加入恢复队列重试")
     
     # 非阻塞恢复：在后台线程中执行耗时的合并/转移操作
     if need_recover:
         t = threading.Thread(target=_recover_tasks, args=(need_recover,), daemon=True)
         t.start()
-        print(f"[恢复] 已启动后台恢复线程，共 {len(need_recover)} 个任务待恢复")
+        logger.info(f"[恢复] 已启动后台恢复线程，共 {len(need_recover)} 个任务待恢复")
 
 
 def _recover_tasks(recover_list: list):
@@ -277,7 +277,7 @@ def _recover_tasks(recover_list: list):
             elif action == "move":
                 _recover_move(tid, t)
         except Exception as e:
-            print(f"[恢复] {tid}: 恢复失败 - {e}")
+            logger.error(f"[恢复] {tid}: 恢复失败 - {e}")
             update_task(tid, status="failed", stage="failed", error=f"恢复失败: {e}")
 
 
@@ -315,16 +315,16 @@ def _recover_merge(tid: str, t: dict):
     
     if not seg_dir:
         update_task(tid, status="failed", stage="failed", error="分片目录不存在，无法恢复合并")
-        print(f"[恢复] {tid}: 分片目录不存在")
+        logger.error(f"[恢复] {tid}: 分片目录不存在")
         return
     
     ts_files = list(seg_dir.glob("[0-9]*.ts"))
     if not ts_files:
         update_task(tid, status="failed", stage="failed", error="分片文件不存在，无法恢复合并")
-        print(f"[恢复] {tid}: 无 TS 分片文件")
+        logger.error(f"[恢复] {tid}: 无 TS 分片文件")
         return
     
-    print(f"[恢复] {tid}: 发现 {len(ts_files)} 个分片，开始合并...")
+    logger.info(f"[恢复] {tid}: 发现 {len(ts_files)} 个分片，开始合并...")
     update_task(tid, stage="merging", progress=0)
     flat = Path(download_dir) / f"{tid}.mp4"
     ok, result = merge_ts_to_mp4(seg_dir, tid, flat)
@@ -333,16 +333,16 @@ def _recover_merge(tid: str, t: dict):
         update_task(tid, status="completed", stage="completed", progress=100, file=str(flat))
         if task_dir.exists():
             shutil.rmtree(task_dir, ignore_errors=True)
-        print(f"[恢复] {tid}: 合并成功")
+        logger.info(f"[恢复] {tid}: 合并成功")
         
         # 合并后尝试转移
         name = t.get("name", tid) or tid
         update_task(tid, stage="moving", progress=0)
         move_to_media_library(tid, str(flat), name + ".mp4")
-        print(f"[恢复] {tid}: 启动转移")
+        logger.info(f"[恢复] {tid}: 启动转移")
     else:
         update_task(tid, status="failed", stage="failed", error=f"合并失败: {result}")
-        print(f"[恢复] {tid}: 合并失败 - {result}")
+        logger.error(f"[恢复] {tid}: 合并失败 - {result}")
 
 
 def _recover_move(tid: str, t: dict):
@@ -389,7 +389,7 @@ def _recover_move(tid: str, t: dict):
                         shutil.copy2(str(candidate), str(dest))
                         candidate.unlink()
                     mp4_path = dest
-                    print(f"[恢复] {tid}: 从 temp_dir 恢复到 download_dir")
+                    logger.info(f"[恢复] {tid}: 从 temp_dir 恢复到 download_dir")
 
     # 4. 最后 fallback 到全局配置
     if not mp4_path:
@@ -409,14 +409,14 @@ def _recover_move(tid: str, t: dict):
                     shutil.copy2(str(temp_mp4), str(dest))
                     temp_mp4.unlink()
                 mp4_path = dest
-                print(f"[恢复] {tid}: 从全局 temp_dir 恢复到 download_dir")
+                logger.info(f"[恢复] {tid}: 从全局 temp_dir 恢复到 download_dir")
 
     if mp4_path and mp4_path.exists():
         name = t.get("name", tid) or tid
         update_task(tid, stage="moving", progress=0, move_speed="", move_elapsed="",
                    file=str(mp4_path))
         move_to_media_library(tid, str(mp4_path), name + ".mp4")
-        print(f"[恢复] {tid}: 重启转移")
+        logger.info(f"[恢复] {tid}: 重启转移")
     else:
         update_task(tid, status="failed", stage="failed", error="转移中断：源文件不存在")
-        print(f"[恢复] {tid}: 本地 mp4 不存在，标记失败")
+        logger.error(f"[恢复] {tid}: 本地 mp4 不存在，标记失败")

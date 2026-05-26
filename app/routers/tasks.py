@@ -447,7 +447,7 @@ def create_task_from_url(body: FromUrlRequest):
     try:
         info = resolve_video_info(video_url, source_config=source_config if source_config else None)
     except Exception as e:
-        print(f"[from-url] resolve_video_info failed: {e}\n{traceback.format_exc()}")
+        logger.info(f"[from-url] resolve_video_info failed: {e}\n{traceback.format_exc()}")
         raise HTTPException(502, f"页面解析失败: {e}")
     if not info:
         raise HTTPException(502, f"无法从页面提取 m3u8: {video_url}")

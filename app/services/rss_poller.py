@@ -5,6 +5,7 @@ feed_type='webpage': 从网页提取 m3u8（通过订阅源配置的解析规则
 feed_type='rss': 标准 RSS 订阅
 feed_type='m3u8_direct': 直接 m3u8 URL（无需轮询）
 """
+import logging
 import re
 import time
 import sqlite3
@@ -16,6 +17,8 @@ from pathlib import Path
 from datetime import datetime
 
 from app.db.database import get_db, get_task, create_task, update_task, get_proxy_config
+
+logger = logging.getLogger("dl-manager")
 
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
@@ -49,7 +52,7 @@ def _get_proxy_opener():
         })
         return urllib.request.build_opener(proxy_handler)
     except Exception as e:
-        print(f"[_get_proxy_opener] Failed to build proxy opener: {e}")
+        logger.warning(f"[_get_proxy_opener] Failed to build proxy opener: {e}")
         return None
 
 
@@ -80,7 +83,7 @@ def _fetch_url(url: str, referer: str = "", custom_headers: str = "", timeout: i
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.read().decode('utf-8', errors='replace')
     except Exception as e:
-        print(f"[_fetch_url] Failed to fetch {url}: {e}")
+        logger.warning(f"[_fetch_url] Failed to fetch {url}: {e}")
         return ""
 
 
@@ -228,7 +231,7 @@ def resolve_video_info(video_url: str, source_config: dict = None, title: str = 
     # 提取 m3u8
     m3u8_url = _extract_m3u8(html, cfg.get("m3u8_selector", ""))
     if not m3u8_url:
-        print(f"[resolve_video_info] no m3u8 found in {video_url}, html_len={len(html)}")
+        logger.warning(f"[resolve_video_info] no m3u8 found in {video_url}, html_len={len(html)}")
         return {}
 
     # 提取 AES 密钥
@@ -335,7 +338,7 @@ def poll_rss_source(source: dict) -> list:
             if task["status"] in ("waiting",):
                 new_tasks.append(task)
     except ET.ParseError as e:
-        print(f"[poll_rss_source] XML parse error for {url}: {e}")
+        logger.warning(f"[poll_rss_source] XML parse error for {url}: {e}")
 
     return new_tasks
 
@@ -357,7 +360,7 @@ def poll_all_sources() -> list:
                 new_tasks = poll_webpage_source(src)
             all_new.extend(new_tasks)
         except Exception as e:
-            print(f"[rss_poller] Error polling {src['name']}: {e}")
+            logger.error(f"[rss_poller] Error polling {src['name']}: {e}")
     return all_new
 
 

@@ -8,12 +8,15 @@ N_m3u8DL-RE 创建的文件: 0000.ts ~ 2557.ts (zero-padded)
 - re-encode 保底（libx264+aac）
 - 更好的进度追踪
 """
+import logging
 import subprocess
 import re
 import threading
 import os
 from pathlib import Path
 from app.db.database import update_task
+
+logger = logging.getLogger("dl-manager")
 
 # 估算文件大小（MB），用于进度计算
 EST_MP4_SIZE_MB = 2048
@@ -33,7 +36,7 @@ def merge_ts_to_mp4(seg_dir: Path, task_id: str, output_path: Path) -> tuple[boo
         return False, "No [0-9]*.ts files found"
 
     total_segments = len(ts_files)
-    print(f"[merger] {task_id}: 开始合并 {total_segments} 个 TS 片段")
+    logger.info(f"[merger] {task_id}: 开始合并 {total_segments} 个 TS 片段")
 
     # === 检查源流连续性：采样 ffprobe 判断是否有编码跳变 ===
     samples = [ts_files[0], ts_files[len(ts_files)//2], ts_files[-1]]
@@ -50,7 +53,7 @@ def merge_ts_to_mp4(seg_dir: Path, task_id: str, output_path: Path) -> tuple[boo
             probe_result = r.stdout.strip()
             if i > 0 and prev_probe and probe_result != prev_probe:
                 has_discontinuity = True
-                print(f"[merger] {task_id}: 检测到编码跳变 (前={prev_probe} 中/后={probe_result})，跳过 concat copy")
+                logger.warning(f"[merger] {task_id}: 检测到编码跳变 (前={prev_probe} 中/后={probe_result})，跳过 concat copy")
                 break
             prev_probe = probe_result
         except Exception:
@@ -69,7 +72,7 @@ def merge_ts_to_mp4(seg_dir: Path, task_id: str, output_path: Path) -> tuple[boo
         return True, str(output_path)
 
     # copy 失败，尝试 re-encode
-    print(f"[merger] {task_id}: concat copy 失败，尝试 re-encode...")
+    logger.warning(f"[merger] {task_id}: concat copy 失败，尝试 re-encode...")
     return _do_reencode(seg_dir, ts_files, task_id, output_path)
 
 
@@ -98,7 +101,7 @@ def _do_concat_copy(seg_dir: Path, ts_files: list, task_id: str, output_path: Pa
         str(output_path)
     ]
 
-    print(f"[merger] {task_id}: 执行 concat copy (with aac_adtstoasc)...")
+    logger.info(f"[merger] {task_id}: 执行 concat copy (with aac_adtstoasc)...")
     proc = subprocess.Popen(cmd_copy, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
 
     stderr_lines = []
@@ -121,7 +124,7 @@ def _do_concat_copy(seg_dir: Path, ts_files: list, task_id: str, output_path: Pa
         pass
 
     if proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
-        print(f"[merger] {task_id}: concat copy 成功! size={output_path.stat().st_size}")
+        logger.info(f"[merger] {task_id}: concat copy 成功! size={output_path.stat().st_size}")
         return True, str(output_path)
 
     return False, stderr_text[-500:]
@@ -146,7 +149,7 @@ def _do_reencode(seg_dir: Path, ts_files: list, task_id: str, output_path: Path)
         str(output_path)
     ]
 
-    print(f"[merger] {task_id}: 执行 re-encode (libx264+aac)...")
+    logger.info(f"[merger] {task_id}: 执行 re-encode (libx264+aac)...")
     proc2 = subprocess.Popen(cmd_reencode, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
 
     stderr2_lines = []
@@ -171,7 +174,7 @@ def _do_reencode(seg_dir: Path, ts_files: list, task_id: str, output_path: Path)
         pass
 
     if proc2.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
-        print(f"[merger] {task_id}: re-encode 成功! size={output_path.stat().st_size}")
+        logger.info(f"[merger] {task_id}: re-encode 成功! size={output_path.stat().st_size}")
         return True, str(output_path)
 
     err_msg = stderr2_text[-800:] if stderr2_text else f"ffmpeg exit {proc2.returncode}"

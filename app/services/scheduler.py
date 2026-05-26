@@ -4,11 +4,14 @@ APScheduler 调度器：每个订阅源独立的定时轮询
 每个 subscription_source 有自己的 poll_cron 字段（cron 表达式），
 调度器为每个启用的源创建独立的 job。
 """
+import logging
 import threading
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.jobstores.base import JobLookupError
 from app.db.database import list_sources, get_source
+
+logger = logging.getLogger("dl-manager")
 
 scheduler = BackgroundScheduler()
 _scheduler_lock = threading.Lock()
@@ -34,9 +37,9 @@ def _poll_single_source(source_id: int):
         if new_tasks:
             from app.services.queue import try_start_next
             try_start_next()
-        print(f"[scheduler] 源 '{source['name']}' 轮询完成，新增 {len(new_tasks)} 个任务")
+        logger.info(f"[scheduler] 源 '{source['name']}' 轮询完成，新增 {len(new_tasks)} 个任务")
     except Exception as e:
-        print(f"[scheduler] 源 '{source.get('name', source_id)}' 轮询失败: {e}")
+        logger.error(f"[scheduler] 源 '{source.get('name', source_id)}' 轮询失败: {e}")
 
 
 def _source_job_id(source_id: int) -> str:
@@ -57,7 +60,7 @@ def _parse_cron(cron_expr: str):
             day_of_week=day_of_week, timezone="Asia/Shanghai"
         )
     except Exception as e:
-        print(f"[scheduler] 无效 cron 表达式 '{cron_expr}': {e}")
+        logger.warning(f"[scheduler] 无效 cron 表达式 '{cron_expr}': {e}")
         return None
 
 
@@ -70,7 +73,7 @@ def _add_source_job(source: dict):
 
     trigger = _parse_cron(cron_expr)
     if not trigger:
-        print(f"[scheduler] 源 '{source['name']}' 的 cron 无效: {cron_expr}，跳过")
+        logger.warning(f"[scheduler] 源 '{source['name']}' 的 cron 无效: {cron_expr}，跳过")
         return
 
     job_id = _source_job_id(source_id)
@@ -80,7 +83,7 @@ def _add_source_job(source: dict):
         name=f"轮询: {source['name']}",
         replace_existing=True,
     )
-    print(f"[scheduler] 已注册源 '{source['name']}' 定时轮询 (cron: {cron_expr})")
+    logger.info(f"[scheduler] 已注册源 '{source['name']}' 定时轮询 (cron: {cron_expr})")
 
 
 def start_scheduler():
@@ -92,13 +95,13 @@ def start_scheduler():
     sources = list_sources(enabled_only=True)
     for src in sources:
         _add_source_job(src)
-    print(f"[scheduler] 调度器已启动，已注册 {len(sources)} 个订阅源")
+    logger.info(f"[scheduler] 调度器已启动，已注册 {len(sources)} 个订阅源")
 
 
 def stop_scheduler():
     if scheduler.running:
         scheduler.shutdown(wait=False)
-        print("[scheduler] 调度器已停止")
+        logger.info("[scheduler] 调度器已停止")
 
 
 def refresh_source_job(source_id: int):
