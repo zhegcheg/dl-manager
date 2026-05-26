@@ -10,10 +10,11 @@ services:
       # 下载目录（持久化）
       - /home/zhegcheg/imovie/tasks:/app/tasks
       # 数据库和日志（持久化）
-      - /home/zhegcheg/.jable-dl-server:/root/.jable-dl-server
+      - /home/zhegcheg/.dl-manager:/root/.dl-manager
       # NAS 挂载点（从宿主机传入容器）
       - /mnt/fn-nas-imovie:/mnt/fn-nas-imovie
     environment:
       - TZ=Asia/Shanghai
+      - PORT=8899
       # NAS 媒体目录路径（容器内路径，需与 volumes 挂载对应）
       - NAS_MEDIA_DIR=/mnt/fn-nas-imovie

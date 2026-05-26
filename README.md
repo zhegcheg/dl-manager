@@ -2,11 +2,46 @@
 
 > 视频下载管理工具，基于 yt-dlp + ffmpeg 实现 m3u8 视频下载、合并、自动转移至 NAS。
 
+[![Docker Hub](https://img.shields.io/docker/pulls/zhegcheg/dl-manager?style=flat-square)](https://hub.docker.com/r/zhegcheg/dl-manager)
 ![status](https://img.shields.io/badge/status-active-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.109-green)
 ![Vue](https://img.shields.io/badge/Vue-3-42b883)
 ![yt-dlp](https://img.shields.io/badge/yt--dlp-latest-orange)
+
+---
+
+## 一键部署（Docker Hub）
+
+```bash
+# 拉取镜像
+docker pull zhegcheg/dl-manager:latest
+
+# 启动（默认端口 8899）
+docker run -d --name dl-manager \
+  --network host \
+  -v ~/dl-manager/tasks:/app/tasks \
+  -v ~/.dl-manager:/root/.dl-manager \
+  -v /mnt/nas:/mnt/nas \
+  -e NAS_MEDIA_DIR=/mnt/nas \
+  -e TZ=Asia/Shanghai \
+  zhegcheg/dl-manager:latest
+```
+
+**自定义端口**：
+```bash
+docker run -d --name dl-manager \
+  --network host \
+  -v ~/dl-manager/tasks:/app/tasks \
+  -v ~/.dl-manager:/root/.dl-manager \
+  -v /mnt/nas:/mnt/nas \
+  -e NAS_MEDIA_DIR=/mnt/nas \
+  -e PORT=8899 \
+  -e TZ=Asia/Shanghai \
+  zhegcheg/dl-manager:latest
+```
+
+> 更多部署参数见下文「配置说明」章节。
 
 ---
 
@@ -37,7 +72,7 @@ git clone https://github.com/zhegcheg/dl-manager.git
 cd dl-manager
 
 # 创建数据目录
-mkdir -p ~/.jable-dl-server
+mkdir -p ~/.dl-manager
 
 # 启动（host 网络模式）
 docker compose up -d
@@ -111,8 +146,8 @@ dl-manager/
 
 | 配置项 | 说明 | 默认值 | 范围 |
 |--------|------|--------|------|
-| 下载目录 | 视频下载存储路径 | `~/.jable-dl-server/tasks` | - |
-| 临时目录 | 分片下载暂存路径 | `~/.jable-dl-server/temp` | - |
+| 下载目录 | 视频下载存储路径 | `~/.dl-manager/tasks` | - |
+| 临时目录 | 分片下载暂存路径 | `~/.dl-manager/temp` | - |
 | 最大并发数 | 同时下载的任务数 | `2` | 1-10 |
 | 每任务线程数 | 每个任务的下载线程数 | `8` | 1-16 |
 | NAS 转移 | 完成后自动复制到 NAS | `true` | on/off |
@@ -205,7 +240,7 @@ dl-manager/
 ## 数据存储
 
 ```
-~/.jable-dl-server/
+~/.dl-manager/
 ├── state.db          # SQLite 数据库（WAL 模式）
 ├── logs/             # 任务日志（每个任务一个 .log 文件）
 ├── tasks/            # 下载目录（可配置）

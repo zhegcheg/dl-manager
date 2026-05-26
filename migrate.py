@@ -1,11 +1,11 @@
 """
-数据迁移脚本：.jable-dl-server → .dl-manager
+数据迁移脚本：.dl-manager → .dl-manager（跨版本兼容）
 运行一次即可：python migrate.py
 """
 import shutil
 from pathlib import Path
 
-OLD_DIR = Path.home() / ".jable-dl-server"
+OLD_DIR = Path.home() / ".dl-manager"
 NEW_DIR = Path.home() / ".dl-manager"
 
 

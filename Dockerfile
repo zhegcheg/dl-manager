@@ -17,6 +17,6 @@ COPY . .
 # 创建必要目录
 RUN mkdir -p logs tasks
 
-EXPOSE 8899
+EXPOSE ${PORT:-8899}
 
 CMD ["python3", "server.py"]
