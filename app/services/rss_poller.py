@@ -12,25 +12,55 @@ import sqlite3
 import threading
 import urllib.request
 import urllib.error
+import http.cookiejar
+import gzip
+import zlib
+import brotli
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime
+from io import BytesIO
 
 from app.db.database import get_db, get_task, create_task, update_task, get_proxy_config
 
 logger = logging.getLogger("dl-manager")
 
 DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+}
+
+RSS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
 }
 
 
-def _get_proxy_opener():
+def _get_proxy_opener(with_cookies: bool = False):
     """根据 proxy_config 返回配置了代理的 urllib opener，或 None"""
     try:
         cfg = get_proxy_config()
         if cfg.get("enabled") != "true":
+            if with_cookies:
+                return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
             return None
         proxy_type = cfg.get("type", "http")
         host = cfg.get("host", "").strip()
@@ -38,6 +68,8 @@ def _get_proxy_opener():
         username = cfg.get("username", "").strip()
         password = cfg.get("password", "").strip()
         if not host:
+            if with_cookies:
+                return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
             return None
         # 构建代理 URL（支持用户名密码认证）
         if username and password:
@@ -50,15 +82,27 @@ def _get_proxy_opener():
             "http": proxy_url,
             "https": proxy_url,
         })
-        return urllib.request.build_opener(proxy_handler)
+        handlers: list = [proxy_handler]
+        if with_cookies:
+            handlers.append(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        return urllib.request.build_opener(*handlers)
     except Exception as e:
         logger.warning(f"[_get_proxy_opener] Failed to build proxy opener: {e}")
+        if with_cookies:
+            return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
         return None
 
 
-def _build_headers(referer: str = "", custom_headers: str = "") -> dict:
+def _infer_referer(url: str) -> str:
+    """从 URL 自动推断 referer（scheme + netloc）"""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}/"
+
+
+def _build_headers(referer: str = "", custom_headers: str = "", is_rss: bool = False) -> dict:
     """合并默认 headers + Referer + 自定义 headers"""
-    headers = dict(DEFAULT_HEADERS)
+    headers = dict(RSS_HEADERS if is_rss else DEFAULT_HEADERS)
     if referer:
         headers["Referer"] = referer
     if custom_headers:
@@ -70,18 +114,33 @@ def _build_headers(referer: str = "", custom_headers: str = "") -> dict:
     return headers
 
 
-def _fetch_url(url: str, referer: str = "", custom_headers: str = "", timeout: int = 15) -> str:
-    """通用 URL 请求，支持代理"""
-    headers = _build_headers(referer, custom_headers)
+def _fetch_url(url: str, referer: str = "", custom_headers: str = "", timeout: int = 15, is_rss: bool = False) -> str:
+    """通用 URL 请求，支持代理和 gzip 解压"""
+    headers = _build_headers(referer, custom_headers, is_rss=is_rss)
     try:
         req = urllib.request.Request(url, headers=headers)
         opener = _get_proxy_opener()
         if opener:
             with opener.open(req, timeout=timeout) as resp:
-                return resp.read().decode('utf-8', errors='replace')
+                content = resp.read()
         else:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read().decode('utf-8', errors='replace')
+                content = resp.read()
+        
+        # 自动检测并解压 gzip
+        encoding = resp.headers.get('Content-Encoding', '').lower()
+        if encoding == 'gzip':
+            content = gzip.decompress(content)
+        elif encoding == 'deflate':
+            try:
+                content = zlib.decompress(content)
+            except:
+                content = zlib.decompress(content, -zlib.MAX_WBITS)
+        
+        return content.decode('utf-8', errors='replace')
+    except urllib.error.HTTPError as e:
+        logger.warning(f"[_fetch_url] HTTP {e.code} for {url}: {e.reason}")
+        return ""
     except Exception as e:
         logger.warning(f"[_fetch_url] Failed to fetch {url}: {e}")
         return ""
@@ -210,7 +269,7 @@ def resolve_video_info(video_url: str, source_config: dict = None, title: str = 
     返回: {id, name, m3u8_url, key, iv, headers} 或 {}
     """
     cfg = source_config or {}
-    referer = cfg.get("referer", "")
+    referer = cfg.get("referer", "") or _infer_referer(video_url)
     custom_headers = cfg.get("headers", "")
 
     html = _fetch_url(video_url, referer=referer, custom_headers=custom_headers)
@@ -259,11 +318,12 @@ def poll_webpage_source(source: dict) -> list:
     返回: 新增任务列表
     """
     url = source["url"]
-    referer = source.get("referer", "")
+    referer = source.get("referer", "") or _infer_referer(url)
     page_url_pattern = source.get("page_url_pattern", "")
 
     content = _fetch_url(url, referer=referer, timeout=35)
     if not content:
+        logger.warning(f"[poll_webpage_source] 无法获取页面内容: {url}")
         return []
 
     # 从页面提取视频链接列表
@@ -273,17 +333,19 @@ def poll_webpage_source(source: dict) -> list:
         # 通用 fallback: 提取所有含视频特征的链接
         video_urls = re.findall(r'href="(https?://[^"]+)"', content)
     video_urls = list(dict.fromkeys(video_urls))
+    logger.info(f"[poll_webpage_source] {url} 提取到 {len(video_urls)} 个视频链接")
 
     new_tasks = []
     for video_url in video_urls:
-        info = resolve_video_info(video_url, source_config=source)
-        if not info:
-            continue
-
-        vid = info["id"]
+        vid = _extract_video_id(video_url, source.get("video_id_pattern", ""))
         existing = get_task(vid)
         if existing and existing["status"] not in ("failed", "stopped"):
             continue  # 跳过已存在的非失败任务
+
+        info = resolve_video_info(video_url, source_config=source)
+        if not info:
+            logger.warning(f"[poll_webpage_source] 无法解析视频页面: {video_url}")
+            continue
 
         task = create_task(vid, info["name"], info["m3u8_url"],
                           info["headers"], info["key"], info["iv"],
@@ -291,21 +353,84 @@ def poll_webpage_source(source: dict) -> list:
         if task["status"] in ("waiting",):
             new_tasks.append(task)
 
+    logger.info(f"[poll_webpage_source] {url} 新增 {len(new_tasks)} 个任务")
     return new_tasks
 
 
-def poll_rss_source(source: dict) -> list:
-    """轮询标准 RSS 订阅源"""
-    url = source["url"]
+def _fetch_url_with_session(url: str, referer: str = "", custom_headers: str = "", timeout: int = 15, is_rss: bool = False, opener=None, retries: int = 2) -> str:
+    """通用 URL 请求，支持代理、gzip 解压、cookie session 和重试"""
+    headers = _build_headers(referer, custom_headers, is_rss=is_rss)
+    last_error = None
+    
+    for attempt in range(retries + 1):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            if opener is None:
+                opener = _get_proxy_opener(with_cookies=True)
+            if opener:
+                with opener.open(req, timeout=timeout) as resp:
+                    content = resp.read()
+            else:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    content = resp.read()
+            
+            # 自动检测并解压各种编码
+            encoding = resp.headers.get('Content-Encoding', '').lower()
+            if encoding == 'gzip':
+                content = gzip.decompress(content)
+            elif encoding == 'deflate':
+                try:
+                    content = zlib.decompress(content)
+                except:
+                    content = zlib.decompress(content, -zlib.MAX_WBITS)
+            elif encoding == 'br':
+                content = brotli.decompress(content)
+            
+            return content.decode('utf-8', errors='replace')
+        except urllib.error.HTTPError as e:
+            last_error = f"HTTP {e.code}: {e.reason}"
+            if e.code == 403 and attempt < retries:
+                logger.info(f"[_fetch_url_with_session] {url} got 403, retrying in {2 ** attempt}s...")
+                time.sleep(2 ** attempt)
+                continue
+            logger.warning(f"[_fetch_url_with_session] HTTP {e.code} for {url}: {e.reason}")
+            return ""
+        except Exception as e:
+            last_error = str(e)
+            if attempt < retries:
+                logger.info(f"[_fetch_url_with_session] {url} failed: {e}, retrying in {2 ** attempt}s...")
+                time.sleep(2 ** attempt)
+                continue
+            logger.warning(f"[_fetch_url_with_session] Failed to fetch {url}: {e}")
+            return ""
+    
+    return ""
 
-    content = _fetch_url(url, timeout=35)
+
+def poll_rss_source(source: dict) -> list:
+    """轮询标准 RSS 订阅源，使用 cookie session"""
+    url = source["url"]
+    referer = source.get("referer", "") or _infer_referer(url)
+    
+    # 创建带 cookie 的 opener
+    opener = _get_proxy_opener(with_cookies=True)
+    
+    # 先访问主页获取 cookies
+    home_url = referer
+    _fetch_url_with_session(home_url, referer=home_url, timeout=15, opener=opener)
+    
+    # 再访问 RSS
+    content = _fetch_url_with_session(url, referer=referer, timeout=35, is_rss=True, opener=opener)
     if not content:
+        logger.warning(f"[poll_rss_source] 无法获取 RSS 内容: {url}")
         return []
 
     new_tasks = []
     try:
         root = ET.fromstring(content)
-        for item in root.iter("item"):
+        items = list(root.iter("item"))
+        logger.info(f"[poll_rss_source] {url} 解析到 {len(items)} 个 item")
+        for item in items:
             link = ""
             enclosure = item.find("enclosure")
             if enclosure is not None:
@@ -317,19 +442,22 @@ def poll_rss_source(source: dict) -> list:
             if not link:
                 continue
 
+            # 先提取 video_id 检查是否已存在，避免不必要的页面请求
+            vid = _extract_video_id(link, source.get("video_id_pattern", ""))
+            existing = get_task(vid)
+            if existing and existing["status"] not in ("failed", "stopped"):
+                continue
+
             # 从 RSS item 提取标题（通常比页面 <title> 更干净）
             rss_title = ""
             title_el = item.find("title")
             if title_el is not None:
                 rss_title = (title_el.text or "").strip()
 
-            info = resolve_video_info(link, source_config=source, title=rss_title)
+            # 使用同一个 cookie session 访问视频页面
+            info = _resolve_video_info_with_session(link, source_config=source, title=rss_title, opener=opener)
             if not info:
-                continue
-
-            vid = info["id"]
-            existing = get_task(vid)
-            if existing and existing["status"] not in ("failed", "stopped"):
+                logger.warning(f"[poll_rss_source] 无法解析视频页面: {link}")
                 continue
 
             task = create_task(vid, info["name"], info["m3u8_url"],
@@ -340,7 +468,53 @@ def poll_rss_source(source: dict) -> list:
     except ET.ParseError as e:
         logger.warning(f"[poll_rss_source] XML parse error for {url}: {e}")
 
+    logger.info(f"[poll_rss_source] {url} 新增 {len(new_tasks)} 个任务")
     return new_tasks
+
+
+def _resolve_video_info_with_session(video_url: str, source_config: dict = None, title: str = "", opener=None) -> dict:
+    """使用已有 session 解析视频页面"""
+    cfg = source_config or {}
+    referer = cfg.get("referer", "") or _infer_referer(video_url)
+    custom_headers = cfg.get("headers", "")
+
+    html = _fetch_url_with_session(video_url, referer=referer, custom_headers=custom_headers, opener=opener)
+    if not html:
+        return {}
+
+    # 标题：优先使用外部传入的（如 RSS 标题），否则从页面提取
+    if title:
+        name = _clean_title(title)
+    else:
+        title_pattern = cfg.get("title_selector", r'<title>([^<]+)</title>')
+        raw_title = _extract_text(html, title_pattern)
+        name = _clean_title(raw_title)
+
+    # 提取 video_id
+    video_id = _extract_video_id(video_url, cfg.get("video_id_pattern", ""))
+
+    # 提取 m3u8
+    m3u8_url = _extract_m3u8(html, cfg.get("m3u8_selector", ""))
+    if not m3u8_url:
+        logger.warning(f"[_resolve_video_info_with_session] no m3u8 found in {video_url}, html_len={len(html)}")
+        return {}
+
+    # 提取 AES 密钥
+    key, iv = _extract_aes_key(html, m3u8_url, source=cfg)
+
+    # 构建 headers 字符串
+    headers_str = ""
+    if referer:
+        headers_str = f"Referer: {referer}"
+
+    return {
+        "id": video_id,
+        "name": name or video_id,
+        "m3u8_url": m3u8_url,
+        "key": key,
+        "iv": iv,
+        "headers": headers_str,
+    }
 
 
 def poll_all_sources() -> list:
