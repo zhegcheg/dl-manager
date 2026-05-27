@@ -303,9 +303,12 @@ def serve_media_by_id(task_id: str, request: Request):
 @router.get("/api/media/{filename:path}")
 def serve_media(filename: str):
     """从 NAS 提供视频文件"""
-    if ".." in filename or filename.startswith("/"):
+    # 严格限制路径必须在 MEDIA_DIR 之下
+    try:
+        file_path = (MEDIA_DIR / filename).resolve()
+        file_path.relative_to(MEDIA_DIR.resolve())
+    except (ValueError, RuntimeError):
         raise HTTPException(403, "Access denied")
-    file_path = MEDIA_DIR / filename
     if not file_path.exists():
         raise HTTPException(404, "File not found")
-    return FileResponse(str(file_path), media_type="video/mp4", filename=filename)
+    return FileResponse(str(file_path), media_type="video/mp4", filename=file_path.name)

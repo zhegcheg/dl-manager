@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from app.db.database import (
     get_task, list_tasks, update_task, delete_task,
-    create_task, get_task_log_path, get_task_dir,
+    create_task, get_task_log_path,
     reset_task_for_manual_retry, get_download_config,
 )
 from app.services.queue import get_active_downloads, is_downloading, try_start_next
@@ -24,8 +24,8 @@ from app.events import subscribe, unsubscribe
 
 router = APIRouter()
 
-# 保存运行中的进程
-running_procs = {}
+# 注意：运行中的进程统一由 app.services.queue._running 管理，
+# 不再在本模块维护独立字典，避免双轨制不一致和内存泄漏。
 
 # ====== 系统资源监控 ======
 
@@ -229,39 +229,41 @@ class UpdateTaskRequest(BaseModel):
 @router.post("/api/tasks/batch/start")
 def batch_start_tasks(body: BatchTaskRequest):
     """批量开始任务"""
-    from app.services.queue import register_download
     from app.services.downloader import start_download
     cfg = get_download_config()
     max_concurrent = int(cfg.get("max_concurrent", "2"))
-    
+
     success = []
     failed = []
     queued = []
-    
+
     for task_id in body.ids:
         try:
             task = get_task(task_id)
             if not task:
                 failed.append({"id": task_id, "reason": "任务不存在"})
                 continue
-            if task["status"] in ("downloading", "merging", "moving"):
+            # 同时检查 status 和 stage，防止 moving 阶段被重复启动
+            if task["status"] in ("downloading",) or task.get("stage") in ("merging", "moving"):
                 failed.append({"id": task_id, "reason": "任务已在运行"})
                 continue
             if is_downloading(task_id):
                 failed.append({"id": task_id, "reason": "任务已在运行"})
                 continue
-            
+
             if get_active_downloads() >= max_concurrent:
                 update_task(task_id, status="waiting", stage="waiting")
                 queued.append(task_id)
             else:
                 proc = start_download(task_id, task["m3u8_url"], task["headers"],
                                       task.get("key", ""), task.get("iv", ""))
-                running_procs[task_id] = proc
+                if proc is None:
+                    failed.append({"id": task_id, "reason": "启动下载失败"})
+                    continue
                 success.append(task_id)
         except Exception as e:
             failed.append({"id": task_id, "reason": str(e)})
-    
+
     try_start_next()
     return {
         "message": f"成功 {len(success)} 个，排队 {len(queued)} 个，失败 {len(failed)} 个",
@@ -274,34 +276,29 @@ def batch_start_tasks(body: BatchTaskRequest):
 @router.post("/api/tasks/batch/stop")
 def batch_stop_tasks(body: BatchTaskRequest):
     """批量暂停任务"""
-    from app.services.queue import is_downloading as qm_is_running, unregister_download, _running
-    
+    from app.services.queue import unregister_download, _running
+
     success = []
     failed = []
-    
+
     for task_id in body.ids:
         try:
             task = get_task(task_id)
             if not task:
                 failed.append({"id": task_id, "reason": "任务不存在"})
                 continue
-            
-            # 停止进程
-            proc = running_procs.get(task_id)
+
+            # 停止进程（统一从 _running 管理）
+            proc = _running.get(task_id)
             if proc:
                 proc.terminate()
-                running_procs.pop(task_id, None)
-            if qm_is_running(task_id):
-                proc = _running.get(task_id)
-                if proc:
-                    proc.terminate()
-                unregister_download(task_id)
-            
+            unregister_download(task_id)
+
             update_task(task_id, status="stopped", stage="stopped")
             success.append(task_id)
         except Exception as e:
             failed.append({"id": task_id, "reason": str(e)})
-    
+
     try_start_next()
     return {
         "message": f"成功 {len(success)} 个，失败 {len(failed)} 个",
@@ -313,25 +310,24 @@ def batch_stop_tasks(body: BatchTaskRequest):
 @router.post("/api/tasks/batch/retry")
 def batch_retry_tasks(body: BatchTaskRequest):
     """批量重试失败任务（仅重置状态，m3u8/key刷新由下载器启动时异步完成）"""
+    from app.services.queue import unregister_download, _running
+
     success = []
     failed = []
-    
+
     for task_id in body.ids:
         try:
             task = get_task(task_id)
             if not task:
                 failed.append({"id": task_id, "reason": "任务不存在"})
                 continue
-            
+
             # 停止可能存在的进程
-            proc = running_procs.get(task_id)
+            proc = _running.get(task_id)
             if proc:
                 proc.terminate()
-                running_procs.pop(task_id, None)
-            from app.services.queue import is_downloading as qm_is_running, unregister_download
-            if qm_is_running(task_id):
-                unregister_download(task_id)
-            
+            unregister_download(task_id)
+
             # 如果 video_url 为空，尝试从 source_id 恢复（供下载器刷新用）
             video_url = task.get("video_url", "")
             if not video_url and task.get("source_id"):
@@ -343,12 +339,12 @@ def batch_retry_tasks(body: BatchTaskRequest):
                         video_url = refresh_pattern.replace("{task_id}", task_id)
                         update_task(task_id, video_url=video_url)
                         logger.info(f"[批量重试] {task_id}: 从订阅源配置恢复 video_url")
-            
+
             reset_task_for_manual_retry(task_id)
             success.append(task_id)
         except Exception as e:
             failed.append({"id": task_id, "reason": str(e)})
-    
+
     try_start_next()
     return {
         "message": f"成功 {len(success)} 个，失败 {len(failed)} 个",
@@ -360,32 +356,28 @@ def batch_retry_tasks(body: BatchTaskRequest):
 @router.post("/api/tasks/batch/delete")
 def batch_delete_tasks(body: BatchTaskRequest):
     """批量删除任务"""
-    from app.services.queue import is_downloading as qm_is_running, unregister_download, _running
-    
+    from app.services.queue import unregister_download, _running
+
     success = []
     failed = []
-    
+
     for task_id in body.ids:
         try:
             # 停止进程
-            proc = running_procs.get(task_id)
+            proc = _running.get(task_id)
             if proc:
                 proc.terminate()
-                running_procs.pop(task_id, None)
-            if qm_is_running(task_id):
-                proc = _running.get(task_id)
-                if proc:
-                    proc.terminate()
-                unregister_download(task_id)
-            
-            # 清理文件
-            task_dir = get_task_dir(task_id)
+            unregister_download(task_id)
+
+            # 清理文件（避免 get_task_dir 创建目录）
+            cfg = get_download_config()
+            download_dir = cfg.get("download_dir", str(Path.home() / ".dl-manager" / "tasks"))
+            task_dir = Path(download_dir) / task_id
             if task_dir.exists():
                 shutil.rmtree(task_dir)
-            flat_mp4 = Path(get_download_config().get("download_dir", "")) / f"{task_id}.mp4"
+            flat_mp4 = Path(download_dir) / f"{task_id}.mp4"
             if flat_mp4.exists():
                 flat_mp4.unlink()
-            cfg = get_download_config()
             temp_dir = cfg.get("temp_dir", "")
             if temp_dir:
                 import glob
@@ -399,12 +391,12 @@ def batch_delete_tasks(body: BatchTaskRequest):
             log_path = get_task_log_path(task_id)
             if log_path.exists():
                 log_path.unlink()
-            
+
             delete_task(task_id)
             success.append(task_id)
         except Exception as e:
             failed.append({"id": task_id, "reason": str(e)})
-    
+
     return {
         "message": f"成功 {len(success)} 个，失败 {len(failed)} 个",
         "success": success,
@@ -484,11 +476,12 @@ def start_task(task_id: str):
     task = get_task(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
-    if task["status"] in ("downloading", "merging", "moving"):
+    # 同时检查 status 和 stage，防止 moving 阶段被重复启动
+    if task["status"] in ("downloading",) or task.get("stage") in ("merging", "moving"):
         raise HTTPException(400, "Task already running")
     if is_downloading(task_id):
         raise HTTPException(400, "Task already running")
-    from app.services.queue import get_active_downloads, register_download
+    from app.services.queue import get_active_downloads
     from app.db.database import get_download_config
     from app.services.downloader import start_download
     cfg = get_download_config()
@@ -497,22 +490,18 @@ def start_task(task_id: str):
         return {"message": f"队列已满（{max_concurrent}），任务已加入等待队列"}
     proc = start_download(task_id, task["m3u8_url"], task["headers"],
                           task["key"], task["iv"])
-    running_procs[task_id] = proc
+    if proc is None:
+        raise HTTPException(500, "启动下载失败")
     return {"message": "Download started"}
 
 
 @router.post("/api/tasks/{task_id}/stop")
 def stop_task(task_id: str):
-    from app.services.queue import is_downloading as qm_is_running, unregister_download, _running
-    proc = running_procs.get(task_id)
+    from app.services.queue import unregister_download, _running
+    proc = _running.get(task_id)
     if proc:
         proc.terminate()
-        running_procs.pop(task_id, None)
-    if qm_is_running(task_id):
-        proc = _running.get(task_id)
-        if proc:
-            proc.terminate()
-        unregister_download(task_id)
+    unregister_download(task_id)
     update_task(task_id, status="stopped", stage="stopped")
     try_start_next()
     return {"message": "Stopped"}
@@ -521,19 +510,17 @@ def stop_task(task_id: str):
 @router.post("/api/tasks/{task_id}/retry")
 def retry_task(task_id: str):
     """手动重试：不受次数限制，重置 retry_count=0（m3u8/key刷新由下载器启动时异步完成）"""
-    from app.services.queue import is_downloading as qm_is_running, unregister_download
-    
+    from app.services.queue import unregister_download, _running
+
     task = get_task(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
-    
-    proc = running_procs.get(task_id)
+
+    proc = _running.get(task_id)
     if proc:
         proc.terminate()
-        running_procs.pop(task_id, None)
-    if qm_is_running(task_id):
-        unregister_download(task_id)
-    
+    unregister_download(task_id)
+
     # 如果 video_url 为空，尝试从 source_id 恢复（供下载器刷新用）
     video_url = task.get("video_url", "")
     if not video_url and task.get("source_id"):
@@ -545,7 +532,7 @@ def retry_task(task_id: str):
                 video_url = refresh_pattern.replace("{task_id}", task_id)
                 update_task(task_id, video_url=video_url)
                 logger.info(f"[重试] {task_id}: 从订阅源配置恢复 video_url")
-    
+
     # 手动重试时刷新 m3u8/key/iv（用户主动点击，大概率 key 已过期）
     try:
         from app.services.downloader import refresh_m3u8_url
@@ -568,30 +555,27 @@ def retry_task(task_id: str):
 
 @router.delete("/api/tasks/{task_id}")
 def remove_task(task_id: str):
-    from app.services.queue import is_downloading as qm_is_running, unregister_download, _running
-    proc = running_procs.get(task_id)
+    from app.services.queue import unregister_download, _running
+    proc = _running.get(task_id)
     if proc:
         proc.terminate()
-        running_procs.pop(task_id, None)
-    if qm_is_running(task_id):
-        proc = _running.get(task_id)
-        if proc:
-            proc.terminate()
-        unregister_download(task_id)
-    task_dir = get_task_dir(task_id)
+    unregister_download(task_id)
+    # 避免 get_task_dir 创建目录，直接构造路径
+    cfg = get_download_config()
+    download_dir = cfg.get("download_dir", str(Path.home() / ".dl-manager" / "tasks"))
+    task_dir = Path(download_dir) / task_id
     if task_dir.exists():
         try:
             shutil.rmtree(task_dir)
         except Exception:
             pass
-    flat_mp4 = Path(get_download_config().get("download_dir", "")) / f"{task_id}.mp4"
+    flat_mp4 = Path(download_dir) / f"{task_id}.mp4"
     if flat_mp4.exists():
         try:
             flat_mp4.unlink()
         except Exception:
             pass
     # 清理 temp_dir 中的残留
-    cfg = get_download_config()
     temp_dir = cfg.get("temp_dir", "")
     if temp_dir:
         import glob

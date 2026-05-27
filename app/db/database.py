@@ -332,11 +332,26 @@ def list_tasks(status: str = None, limit: int = 500, order_by: str = None) -> li
     conn.close()
     return [dict(r) for r in rows]
 
+# 允许 update_task 修改的字段白名单（防止 SQL 注入）
+_UPDATE_TASK_WHITELIST = {
+    "name", "m3u8_url", "headers", "key", "iv",
+    "status", "stage", "progress", "speed", "segments",
+    "chunks", "move_speed", "move_elapsed", "error",
+    "retry_count", "updated_at", "completed_at",
+    "file", "final_path", "priority", "retry_after",
+    "download_dir", "video_url", "temp_dir",
+}
+
+
 def update_task(task_id: str, reset_retry: bool = False, **fields):
     fields["updated_at"] = datetime.utcnow().isoformat() + "Z"
     # 任务完成时自动记录完成时间
     if fields.get("status") == "completed" and "completed_at" not in fields:
         fields["completed_at"] = datetime.utcnow().isoformat() + "Z"
+    # 字段名校验，防止 SQL 注入
+    unknown = set(fields.keys()) - _UPDATE_TASK_WHITELIST
+    if unknown:
+        raise ValueError(f"Invalid fields for update_task: {unknown}")
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [task_id]
     for attempt in range(3):

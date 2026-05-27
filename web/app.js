@@ -649,7 +649,9 @@ createApp({
                 if (old.status !== updated.status || old.stage !== updated.stage ||
                     old.progress !== updated.progress || old.speed !== updated.speed ||
                     old.segments !== updated.segments || old.error !== updated.error ||
-                    old.move_speed !== updated.move_speed || old.priority !== updated.priority) {
+                    old.move_speed !== updated.move_speed || old.move_elapsed !== updated.move_elapsed ||
+                    old.file !== updated.file || old.final_path !== updated.final_path ||
+                    old.priority !== updated.priority || old.retry_count !== updated.retry_count) {
                   return updated
                 }
                 return old

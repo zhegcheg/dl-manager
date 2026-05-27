@@ -76,6 +76,63 @@ def merge_ts_to_mp4(seg_dir: Path, task_id: str, output_path: Path) -> tuple[boo
     return _do_reencode(seg_dir, ts_files, task_id, output_path)
 
 
+def _parse_concat_progress(line_text: str, task_id: str):
+    """解析 concat copy 进度并更新任务"""
+    if "frame=" in line_text:
+        m = re.search(r'size=\s*(\d+)kB', line_text)
+        if m:
+            size_mb = int(m.group(1)) / 1024
+            progress = min(int(size_mb * 100 / EST_MP4_SIZE_MB), 99)
+            update_task(task_id, progress=progress, stage="merging")
+
+
+def _parse_reencode_progress(line_text: str, task_id: str):
+    """解析 re-encode 进度并更新任务"""
+    if "frame=" in line_text:
+        tm = re.search(r'time=(\d+):(\d+):(\d+)\.\d+', line_text)
+        if tm:
+            h, m, s = int(tm.group(1)), int(tm.group(2)), int(tm.group(3))
+            total_sec = h * 3600 + m * 60 + s
+            est_total = EST_MP4_SIZE_MB * 1024 / 1.6
+            progress = min(int(total_sec * 100 / est_total), 99)
+            update_task(task_id, progress=progress, stage="merging_reencode")
+
+
+def _run_ffmpeg(cmd: list, task_id: str, output_path: Path,
+                progress_parser, timeout: int = 3600) -> tuple[bool, str]:
+    """运行 ffmpeg，带超时保护和实时进度解析"""
+    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
+    stderr_lines = []
+    stderr_lock = threading.Lock()
+
+    def _read_stderr():
+        try:
+            for line in iter(proc.stderr.readline, b''):
+                with stderr_lock:
+                    stderr_lines.append(line)
+                line_text = line.decode('utf-8', errors='ignore')
+                progress_parser(line_text)
+        except Exception:
+            pass
+
+    reader = threading.Thread(target=_read_stderr, daemon=True)
+    reader.start()
+
+    try:
+        exit_code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        logger.error(f"[merger] {task_id}: ffmpeg 超时 ({timeout}s)，强制终止")
+        proc.kill()
+        exit_code = -1
+
+    reader.join(timeout=5)
+    stderr_text = b''.join(stderr_lines).decode('utf-8', errors='ignore')
+
+    if exit_code == 0 and output_path.exists() and output_path.stat().st_size > 0:
+        return True, str(output_path)
+    return False, stderr_text[-500:] if stderr_text else f"ffmpeg exit {exit_code}"
+
+
 def _do_concat_copy(seg_dir: Path, ts_files: list, task_id: str, output_path: Path) -> tuple[bool, str]:
     """策略1：concat copy + AAC filter，返回 (成功, 错误信息)"""
     # 清理临时文件
@@ -104,32 +161,16 @@ def _do_concat_copy(seg_dir: Path, ts_files: list, task_id: str, output_path: Pa
     ]
 
     logger.info(f"[merger] {task_id}: 执行 concat copy (with aac_adtstoasc)...")
-    proc = subprocess.Popen(cmd_copy, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
-
-    stderr_lines = []
-    for line in iter(proc.stderr.readline, b''):
-        stderr_lines.append(line)
-        line_text = line.decode('utf-8', errors='ignore')
-        if "frame=" in line_text:
-            m = re.search(r'size=\s*(\d+)kB', line_text)
-            if m:
-                size_mb = int(m.group(1)) / 1024
-                progress = min(int(size_mb * 100 / EST_MP4_SIZE_MB), 99)
-                update_task(task_id, progress=progress, stage="merging")
-
-    proc.wait()
-    stderr_text = b''.join(stderr_lines).decode('utf-8', errors='ignore')
+    ok, err = _run_ffmpeg(cmd_copy, task_id, output_path, lambda line: _parse_concat_progress(line, task_id))
 
     try:
         concat_list.unlink()
     except Exception:
         pass
 
-    if proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+    if ok:
         logger.info(f"[merger] {task_id}: concat copy 成功! size={output_path.stat().st_size}")
-        return True, str(output_path)
-
-    return False, stderr_text[-500:]
+    return ok, err
 
 
 def _do_reencode(seg_dir: Path, ts_files: list, task_id: str, output_path: Path) -> tuple[bool, str]:
@@ -153,32 +194,15 @@ def _do_reencode(seg_dir: Path, ts_files: list, task_id: str, output_path: Path)
     ]
 
     logger.info(f"[merger] {task_id}: 执行 re-encode (libx264+aac)...")
-    proc2 = subprocess.Popen(cmd_reencode, stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
-
-    stderr2_lines = []
-    for line in iter(proc2.stderr.readline, b''):
-        stderr2_lines.append(line)
-        line_text = line.decode('utf-8', errors='ignore')
-        if "frame=" in line_text:
-            tm = re.search(r'time=(\d+):(\d+):(\d+)\.\d+', line_text)
-            if tm:
-                h, m, s = int(tm.group(1)), int(tm.group(2)), int(tm.group(3))
-                total_sec = h * 3600 + m * 60 + s
-                est_total = EST_MP4_SIZE_MB * 1024 / 1.6
-                progress = min(int(total_sec * 100 / est_total), 99)
-                update_task(task_id, progress=progress, stage="merging_reencode")
-
-    proc2.wait()
-    stderr2_text = b''.join(stderr2_lines).decode('utf-8', errors='ignore')
+    ok, err = _run_ffmpeg(cmd_reencode, task_id, output_path, lambda line: _parse_reencode_progress(line, task_id))
 
     try:
         concat_list.unlink()
     except Exception:
         pass
 
-    if proc2.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+    if ok:
         logger.info(f"[merger] {task_id}: re-encode 成功! size={output_path.stat().st_size}")
         return True, str(output_path)
 
-    err_msg = stderr2_text[-800:] if stderr2_text else f"ffmpeg exit {proc2.returncode}"
-    return False, err_msg[:300]
+    return False, err[:300]

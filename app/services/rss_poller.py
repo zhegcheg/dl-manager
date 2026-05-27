@@ -834,18 +834,25 @@ async def _resolve_with_playwright_async(video_url: str, referer: str = "") -> d
     }
 
 
-def _resolve_with_playwright(video_url: str, referer: str = "") -> dict:
-    """同步包装：在事件循环中运行 Playwright 异步函数"""
+def _resolve_with_playwright_sync(video_url: str, referer: str = "") -> dict:
+    """在线程中独立运行 Playwright（避免与主事件循环冲突）"""
     try:
         return asyncio.run(_resolve_with_playwright_async(video_url, referer))
-    except RuntimeError as e:
-        # 如果已经在事件循环中（如 FastAPI），使用 nest_asyncio
-        if "cannot be called from a running event loop" in str(e):
-            try:
-                import nest_asyncio
-                nest_asyncio.apply()
-                return asyncio.run(_resolve_with_playwright_async(video_url, referer))
-            except ImportError:
-                logger.warning("[playwright] running inside event loop, install nest_asyncio for support")
-                return {}
-        raise
+    except Exception as e:
+        logger.warning(f"[playwright] error resolving {video_url}: {e}")
+        return {}
+
+
+def _resolve_with_playwright(video_url: str, referer: str = "") -> dict:
+    """同步包装：将 Playwright 放到独立线程执行，避免事件循环嵌套问题"""
+    import concurrent.futures
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="pw") as executor:
+            future = executor.submit(_resolve_with_playwright_sync, video_url, referer)
+            return future.result(timeout=120)
+    except concurrent.futures.TimeoutError:
+        logger.warning(f"[playwright] timeout resolving {video_url}")
+        return {}
+    except Exception as e:
+        logger.warning(f"[playwright] error resolving {video_url}: {e}")
+        return {}
