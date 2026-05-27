@@ -496,6 +496,11 @@ def _post_download(task_id: str, download_dir: str, temp_dir: str,
     else:
         # 移动到下载目录
         write_log(f"开始移动文件到: {download_dir}")
+        # 确保目标目录存在
+        try:
+            Path(download_dir).mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            write_log(f"创建目标目录失败: {e}", "WARN")
         # 文件名长度保护（CIFS 文件名上限 255 字节，Windows MAX_PATH 260 字符）
         mp4_name = video_path.name
         name_bytes = len(mp4_name.encode('utf-8'))

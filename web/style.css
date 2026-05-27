@@ -125,6 +125,7 @@
 .list-name { flex: 1; font-size: 13px; color: #e0e0e0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list-progress { width: 120px; flex-shrink: 0; }
 .list-actions { display: flex; gap: 3px; flex-shrink: 0; }
+.action-btn { cursor: pointer; -webkit-appearance: none; appearance: none; outline: none; }
 
 /* Add video modal */
 .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 200; display: flex; align-items: center; justify-content: center; }
