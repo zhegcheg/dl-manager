@@ -583,6 +583,10 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
 
     write_log(f"任务开始 - ID: {task_id}")
     write_log(f"m3u8 URL: {m3u8_url}")
+    if key:
+        write_log(f"AES key: {key[:16]}...")
+    if iv:
+        write_log(f"AES iv: {iv}")
     write_log(f"下载目录: {download_dir}")
     write_log(f"线程数: {thread_count}")
     write_log("下载模式: 子进程（GIL 隔离）")

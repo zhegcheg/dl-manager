@@ -20,6 +20,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime
 from io import BytesIO
+import asyncio
 
 from app.db.database import get_db, get_task, create_task, update_task, get_proxy_config
 
@@ -127,7 +128,7 @@ def _fetch_url(url: str, referer: str = "", custom_headers: str = "", timeout: i
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 content = resp.read()
         
-        # 自动检测并解压 gzip
+        # 自动检测并解压各种编码
         encoding = resp.headers.get('Content-Encoding', '').lower()
         if encoding == 'gzip':
             content = gzip.decompress(content)
@@ -136,6 +137,8 @@ def _fetch_url(url: str, referer: str = "", custom_headers: str = "", timeout: i
                 content = zlib.decompress(content)
             except:
                 content = zlib.decompress(content, -zlib.MAX_WBITS)
+        elif encoding == 'br':
+            content = brotli.decompress(content)
         
         return content.decode('utf-8', errors='replace')
     except urllib.error.HTTPError as e:
@@ -258,56 +261,75 @@ def _extract_aes_key(html: str, m3u8_url: str, source: dict = None) -> tuple:
     return key, iv
 
 
-def resolve_video_info(video_url: str, source_config: dict = None, title: str = "") -> dict:
+def resolve_video_info(video_url: str, source_config: dict = None, title: str = "", use_static_fallback: bool = False) -> dict:
     """
     通用入口：从视频页面 URL 获取完整的下载信息。
 
+    默认使用 Playwright 浏览器渲染获取 m3u8（支持 JS 动态加载的网站）。
+    
     source_config: 订阅源配置 dict，包含解析规则。
-                   如果没有传，则使用通用规则（仅提取 m3u8）。
     title: 可选，外部提供的标题（如 RSS item 标题），优先使用。
+    use_static_fallback: 是否启用静态 HTML 提取作为快速路径（默认关闭，用于兼容旧站）。
 
     返回: {id, name, m3u8_url, key, iv, headers} 或 {}
     """
     cfg = source_config or {}
     referer = cfg.get("referer", "") or _infer_referer(video_url)
     custom_headers = cfg.get("headers", "")
-
-    html = _fetch_url(video_url, referer=referer, custom_headers=custom_headers)
-    if not html:
-        return {}
-
-    # 标题：优先使用外部传入的（如 RSS 标题），否则从页面提取
-    if title:
-        name = _clean_title(title)
-    else:
-        title_pattern = cfg.get("title_selector", r'<title>([^<]+)</title>')
-        raw_title = _extract_text(html, title_pattern)
-        name = _clean_title(raw_title)
-
-    # 提取 video_id
     video_id = _extract_video_id(video_url, cfg.get("video_id_pattern", ""))
 
-    # 提取 m3u8
-    m3u8_url = _extract_m3u8(html, cfg.get("m3u8_selector", ""))
-    if not m3u8_url:
-        logger.warning(f"[resolve_video_info] no m3u8 found in {video_url}, html_len={len(html)}")
+    # 步骤 1: 如果启用静态快速路径，先尝试静态提取
+    if use_static_fallback:
+        logger.info(f"[resolve_video_info] trying static extraction for {video_url}")
+        html = _fetch_url(video_url, referer=referer, custom_headers=custom_headers)
+        if html:
+            # 提取标题
+            if title:
+                name = _clean_title(title)
+            else:
+                title_pattern = cfg.get("title_selector", r'<title>([^<]+)</title>')
+                raw_title = _extract_text(html, title_pattern)
+                name = _clean_title(raw_title)
+            
+            # 提取 m3u8
+            m3u8_url = _extract_m3u8(html, cfg.get("m3u8_selector", ""))
+            if m3u8_url:
+                key, iv = _extract_aes_key(html, m3u8_url, source=cfg)
+                logger.info(f"[resolve_video_info] static extraction succeeded for {video_url}")
+                return {
+                    "id": video_id,
+                    "name": name or video_id,
+                    "m3u8_url": m3u8_url,
+                    "key": key,
+                    "iv": iv,
+                    "headers": f"Referer: {referer}" if referer else "",
+                }
+            else:
+                logger.info(f"[resolve_video_info] static extraction failed (no m3u8), falling back to playwright")
+        else:
+            logger.info(f"[resolve_video_info] static extraction failed (no html), falling back to playwright")
+    
+    # 步骤 2: 使用 Playwright（默认方案）
+    logger.info(f"[resolve_video_info] using playwright for {video_url}")
+    pw_result = _resolve_with_playwright(video_url, referer)
+    if not pw_result:
+        logger.error(f"[resolve_video_info] playwright failed for {video_url}")
         return {}
-
-    # 提取 AES 密钥
-    key, iv = _extract_aes_key(html, m3u8_url, source=cfg)
-
-    # 构建 headers 字符串
-    headers_str = ""
-    if referer:
-        headers_str = f"Referer: {referer}"
-
+    
+    # 合并结果
+    name = ""
+    if title:
+        name = _clean_title(title)
+    elif pw_result.get("name"):
+        name = pw_result["name"]
+    
     return {
         "id": video_id,
         "name": name or video_id,
-        "m3u8_url": m3u8_url,
-        "key": key,
-        "iv": iv,
-        "headers": headers_str,
+        "m3u8_url": pw_result["m3u8_url"],
+        "key": pw_result.get("key", ""),
+        "iv": pw_result.get("iv", ""),
+        "headers": f"Referer: {referer}" if referer else "",
     }
 
 
@@ -560,3 +582,269 @@ def fetch_all_video_details(video_urls: list, source_config: dict = None) -> lis
             if r:
                 results.append(r)
     return results
+
+
+
+
+
+async def _resolve_with_playwright_async(video_url: str, referer: str = "") -> dict:
+    """
+    使用 Playwright 浏览器获取动态加载的 m3u8（默认方案）。
+    适用于所有需要 JavaScript 渲染的网站（含 Cloudflare 保护）。
+    返回: {name, m3u8_url, key, iv} 或 {}
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        logger.warning("[playwright] playwright not installed, skipping dynamic resolution")
+        return {}
+
+    proxy_cfg = get_proxy_config()
+    m3u8_url = ""
+    page_title = ""
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-web-security",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--disable-infobars",
+                    "--window-size=1920,1080",
+                    "--start-maximized",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-accelerated-2d-canvas",
+                    "--disable-gpu",
+                    "--hide-scrollbars",
+                    "--disable-notifications",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-breakpad",
+                    "--disable-component-update",
+                    "--disable-default-apps",
+                    "--disable-features=TranslateUI",
+                    "--disable-hang-monitor",
+                    "--disable-ipc-flooding-protection",
+                    "--disable-popup-blocking",
+                    "--disable-prompt-on-repost",
+                    "--disable-renderer-backgrounding",
+                    "--force-color-profile=srgb",
+                    "--metrics-recording-only",
+                    "--mute-audio",
+                    "--no-first-run",
+                    "--password-store=basic",
+                    "--use-gl=swiftshader",
+                    "--use-mock-keychain",
+                ],
+            )
+
+            context_options: dict = {
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "viewport": {"width": 1920, "height": 1080},
+                "locale": "zh-CN",
+                "timezone_id": "Asia/Shanghai",
+                "permissions": ["geolocation"],
+                "geolocation": {"latitude": 31.2304, "longitude": 121.4737},
+                "color_scheme": "light",
+                "extra_http_headers": {
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"Windows"',
+                    "Upgrade-Insecure-Requests": "1",
+                    "Sec-Fetch-Dest": "document",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Site": "none",
+                    "Sec-Fetch-User": "?1",
+                },
+            }
+            if proxy_cfg.get("enabled") == "true" and proxy_cfg.get("host"):
+                context_options["proxy"] = {
+                    "server": f"http://{proxy_cfg['host']}:{proxy_cfg['port']}",
+                    "username": proxy_cfg.get("username", ""),
+                    "password": proxy_cfg.get("password", ""),
+                }
+
+            context = await browser.new_context(**context_options)
+
+            # 更强的反检测脚本（绕过 Cloudflare / Bot 检测）
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [
+                        {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
+                        {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
+                        {name: 'Native Client', filename: 'internal-nacl-plugin'}
+                    ]
+                });
+                Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+                Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+                Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+                window.chrome = { runtime: {} };
+                window.console.memory = { usedJSHeapSize: 21700000, totalJSHeapSize: 33100000, jsHeapSizeLimit: 2190000000 };
+                delete navigator.__webdriver_script_fn;
+
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+                );
+                Object.defineProperty(Notification, 'permission', { get: () => 'default' });
+
+                const origToString = Function.prototype.toString;
+                Function.prototype.toString = function() {
+                    if (this === window.navigator.permissions.query) { return 'function query() { [native code] }'; }
+                    if (this === Function.prototype.toString) { return 'function toString() { [native code] }'; }
+                    return origToString.call(this);
+                };
+            """)
+
+            page = await context.new_page()
+
+            # 拦截网络请求捕获 m3u8
+            intercepted_urls: list = []
+            async def handle_route(route, request):
+                url = request.url
+                if ".m3u8" in url and not url.endswith(".ts"):
+                    intercepted_urls.append(url)
+                await route.continue_()
+            await page.route("**/*", handle_route)
+
+            logger.info(f"[playwright] navigating to {video_url}")
+            response = await page.goto(video_url, wait_until="networkidle", timeout=45000)
+            await asyncio.sleep(8)  # 等待 JS / Cloudflare 挑战完成
+
+            page_title = await page.title()
+
+            # 若仍在 Cloudflare 挑战页，额外等待
+            if "Just a moment" in page_title or "challenge" in page.url.lower():
+                logger.info("[playwright] waiting for Cloudflare challenge...")
+                await asyncio.sleep(15)
+                page_title = await page.title()
+
+            # 方法 1: window.hlsUrl
+            hls_url = await page.evaluate("() => { try { return window.hlsUrl || ''; } catch(e) { return ''; } }")
+            if hls_url:
+                m3u8_url = hls_url
+                logger.info(f"[playwright] found m3u8 via window.hlsUrl: {m3u8_url[:80]}...")
+
+            # 方法 2: 网络拦截
+            if not m3u8_url and intercepted_urls:
+                m3u8_url = intercepted_urls[0]
+                logger.info(f"[playwright] found m3u8 via network interception: {m3u8_url[:80]}...")
+
+            # 方法 3: 页面 HTML
+            if not m3u8_url:
+                html = await page.content()
+                matches = re.findall(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', html)
+                if matches:
+                    m3u8_url = matches[0]
+                    logger.info(f"[playwright] found m3u8 in HTML: {m3u8_url[:80]}...")
+
+            # 方法 4: 常见 JS 变量
+            if not m3u8_url:
+                for var_name in ("sources", "videoSources", "playerConfig", "videoUrl", "hlsUrl", "m3u8Url", "streamUrl"):
+                    result = await page.evaluate(f"() => {{ try {{ return window.{var_name} || ''; }} catch(e) {{ return ''; }} }}")
+                    if result and isinstance(result, str) and ".m3u8" in result:
+                        m3u8_url = result
+                        logger.info(f"[playwright] found m3u8 via window.{var_name}: {m3u8_url[:80]}...")
+                        break
+                    elif result and isinstance(result, list):
+                        for src in result:
+                            if isinstance(src, dict) and src.get("file") and ".m3u8" in src["file"]:
+                                m3u8_url = src["file"]
+                                logger.info(f"[playwright] found m3u8 via window.{var_name}[].file: {m3u8_url[:80]}...")
+                                break
+                            elif isinstance(src, str) and ".m3u8" in src:
+                                m3u8_url = src
+                                logger.info(f"[playwright] found m3u8 via window.{var_name}[]: {m3u8_url[:80]}...")
+                                break
+                        if m3u8_url:
+                            break
+
+            # 方法 5: video 标签
+            if not m3u8_url:
+                video_elements = await page.query_selector_all("video")
+                for video in video_elements:
+                    src = await video.get_attribute("src")
+                    if src and ".m3u8" in src:
+                        m3u8_url = src
+                        logger.info(f"[playwright] found m3u8 via video tag: {m3u8_url[:80]}...")
+                        break
+
+            await browser.close()
+
+    except Exception as e:
+        logger.warning(f"[playwright] error resolving {video_url}: {e}")
+        return {}
+
+    if not m3u8_url:
+        logger.warning(f"[playwright] no m3u8 found for {video_url}")
+        return {}
+
+    # 从 m3u8 manifest 提取 AES key/iv
+    key, iv = "", ""
+    try:
+        manifest = _fetch_url(m3u8_url, referer=referer or _infer_referer(video_url))
+        if manifest and "EXT-X-KEY" in manifest:
+            key_uri_match = re.search(r'URI="([^"]+)"', manifest)
+            if key_uri_match:
+                key_uri = key_uri_match.group(1)
+                base_url = m3u8_url.rsplit("/", 1)[0]
+                if key_uri.startswith("http"):
+                    full_key_url = key_uri
+                else:
+                    full_key_url = base_url + "/" + key_uri.lstrip("/")
+
+                key_req = urllib.request.Request(
+                    full_key_url,
+                    headers=_build_headers(referer or _infer_referer(video_url)),
+                )
+                opener = _get_proxy_opener()
+                if opener:
+                    with opener.open(key_req, timeout=15) as resp:
+                        key_bytes = resp.read()
+                        key = key_bytes.hex()[:32]
+                else:
+                    with urllib.request.urlopen(key_req, timeout=15) as resp:
+                        key_bytes = resp.read()
+                        key = key_bytes.hex()[:32]
+
+            iv_match = re.search(r'IV=0x([a-fA-F0-9]+)', manifest)
+            if iv_match:
+                iv = "0x" + iv_match.group(1)
+    except Exception as e:
+        logger.warning(f"[playwright] error extracting AES key: {e}")
+
+    # 清理标题
+    name = _clean_title(page_title) if page_title else ""
+
+    return {
+        "name": name,
+        "m3u8_url": m3u8_url,
+        "key": key,
+        "iv": iv,
+    }
+
+
+def _resolve_with_playwright(video_url: str, referer: str = "") -> dict:
+    """同步包装：在事件循环中运行 Playwright 异步函数"""
+    try:
+        return asyncio.run(_resolve_with_playwright_async(video_url, referer))
+    except RuntimeError as e:
+        # 如果已经在事件循环中（如 FastAPI），使用 nest_asyncio
+        if "cannot be called from a running event loop" in str(e):
+            try:
+                import nest_asyncio
+                nest_asyncio.apply()
+                return asyncio.run(_resolve_with_playwright_async(video_url, referer))
+            except ImportError:
+                logger.warning("[playwright] running inside event loop, install nest_asyncio for support")
+                return {}
+        raise

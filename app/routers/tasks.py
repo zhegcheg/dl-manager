@@ -546,6 +546,17 @@ def retry_task(task_id: str):
                 update_task(task_id, video_url=video_url)
                 logger.info(f"[重试] {task_id}: 从订阅源配置恢复 video_url")
     
+    # 手动重试时刷新 m3u8/key/iv（用户主动点击，大概率 key 已过期）
+    try:
+        from app.services.downloader import refresh_m3u8_url
+        fresh = refresh_m3u8_url(task_id)
+        if fresh:
+            logger.info(f"[重试] {task_id}: key/iv 刷新成功")
+        else:
+            logger.info(f"[重试] {task_id}: key/iv 刷新失败，使用原有值")
+    except Exception as e:
+        logger.warning(f"[重试] {task_id}: key/iv 刷新异常 - {e}")
+
     last_error = reset_task_for_manual_retry(task_id)
     try_start_next()
     return {
