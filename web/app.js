@@ -74,6 +74,11 @@ createApp({
     const downloadingCount = computed(() => counts.value.downloading)
     const mergingCount = computed(() => counts.value.merging)
     const movingCount = computed(() => counts.value.moving)
+    const completionPercent = computed(() => {
+      const total = tasks.value.length
+      if (total === 0) return 0
+      return Math.round((completedCount.value / total) * 100)
+    })
     const totalSpeed = computed(() => {
       let total = 0
       for (const t of tasks.value) {
@@ -363,6 +368,10 @@ createApp({
         await fetch(`/api/scheduler?key=rss_cron&value=${encodeURIComponent(schedulerConfig.value.rss_cron)}`, {method:'POST'})
         await fetch(`/api/scheduler?key=rss_enabled&value=${encodeURIComponent(schedulerConfig.value.rss_enabled)}`, {method:'POST'})
       } catch(e) { console.error('save scheduler failed', e) }
+    }
+
+    function openPlayer(t) {
+      window.open(`/player.html?id=${t.id}`, '_blank')
     }
 
     async function retryTask(t) {
@@ -713,10 +722,10 @@ createApp({
 
     return { tasks, sources, filter, tab, pollMsg, polling, starting, batchLoading, schedulerConfig, downloadConfig, newSource, deleteTarget, editingSource,
              showAddModal, showPollModal,
-             activeCount, completedCount, failedCount, waitingCount, stoppedCount, downloadingCount, mergingCount, movingCount, totalSpeed, filteredTasks, stageLabel, relativeTime,
+             activeCount, completedCount, failedCount, waitingCount, stoppedCount, downloadingCount, mergingCount, movingCount, completionPercent, totalSpeed, filteredTasks, stageLabel, relativeTime,
              fetchTasks, fetchSources, fetchScheduler, fetchConfig, pollNow, pollSourceById, addSource, editSource, saveSource, toggleSource, delSource, pollSource, toggleScheduler, updateScheduler,
              deleteTask, confirmDelete,
-             configSaved, configSaving, saveDownloadConfig, saveSchedulerConfig, retryTask, startTask, stopTask,
+             configSaved, configSaving, saveDownloadConfig, saveSchedulerConfig, retryTask, startTask, stopTask, openPlayer,
              selected, selectedCount, allSelected, canBatchStart, canBatchStop, canBatchRetry, viewMode, page, pageSize, totalPages, showPagination, goPage, setPageSize,
              toggleSelect, toggleSelectAll, batchStart, batchStop, batchRetry, batchDelete, toggleViewMode,
              addUrl, adding, addMsg, doAddVideo, canAddVideo,
