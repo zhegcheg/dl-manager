@@ -94,7 +94,7 @@
           <span class="stage" :class="t.stage">[[ stageLabel(t.stage) ]]</span>
           <div class="task-actions">
             <button v-if="t.stage === 'waiting' || t.stage === 'stopped'" class="btn sm" style="border-color:#60a5fa;color:#60a5fa;" @click.stop="startTask(t)" title="开始">▶ 开始</button>
-            <button v-if="t.stage === 'failed'" class="btn sm" style="border-color:#4ade80;color:#4ade80;" @click.stop="retryTask(t)" title="重试">🔄 重试</button>
+            <button v-if="t.stage === 'failed' || t.stage === 'completed'" class="btn sm" style="border-color:#4ade80;color:#4ade80;" @click.stop="retryTask(t)" title="重试">{{ t.stage === 'completed' ? '🔄 重新下载' : '🔄 重试' }}</button>
             <button v-if="t.stage === 'downloading' || t.stage === 'merging' || t.stage === 'moving'" class="btn sm" style="border-color:#fbbf24;color:#fbbf24;" @click.stop="stopTask(t)" title="暂停">⏸ 暂停</button>
             <button class="btn danger sm" @click.stop="deleteTask(t)" title="删除">🗑 删除</button>
           </div>
@@ -142,7 +142,7 @@
         <span v-if="t.stage==='failed'" style="font-size:11px;color:#f87171;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px;" :title="t.error">❌[[ t.error ]]</span>
         <div class="list-actions">
           <button v-if="t.stage === 'waiting' || t.stage === 'stopped'" class="btn sm" style="border-color:#60a5fa;color:#60a5fa;padding:2px 8px;font-size:11px;" @click.stop="startTask(t)">▶</button>
-          <button v-if="t.stage === 'failed'" class="btn sm" style="border-color:#4ade80;color:#4ade80;padding:2px 8px;font-size:11px;" @click.stop="retryTask(t)">🔄</button>
+          <button v-if="t.stage === 'failed' || t.stage === 'completed'" class="btn sm" style="border-color:#4ade80;color:#4ade80;padding:2px 8px;font-size:11px;" @click.stop="retryTask(t)">{{ t.stage === 'completed' ? '↺' : '🔄' }}</button>
           <button v-if="t.stage === 'downloading' || t.stage === 'merging' || t.stage === 'moving'" class="btn sm" style="border-color:#fbbf24;color:#fbbf24;padding:2px 8px;font-size:11px;" @click.stop="stopTask(t)">⏸</button>
           <button class="btn danger sm" style="padding:2px 8px;font-size:11px;" @click.stop="deleteTask(t)">🗑</button>
         </div>
@@ -456,7 +456,7 @@
       </div>
       <div class="panel-footer">
         <button v-if="detailModal.stage === 'waiting' || detailModal.stage === 'stopped'" class="btn" style="border-color:#60a5fa;color:#60a5fa;" @click="startTask(detailModal)">▶ 开始</button>
-        <button v-if="detailModal.stage === 'failed'" class="btn" style="border-color:#4ade80;color:#4ade80;" @click="retryTask(detailModal)">🔄 重试</button>
+        <button v-if="detailModal.stage === 'failed' || detailModal.stage === 'completed'" class="btn" style="border-color:#4ade80;color:#4ade80;" @click="retryTask(detailModal)">{{ detailModal.stage === 'completed' ? '🔄 重新下载' : '🔄 重试' }}</button>
         <button v-if="['downloading','merging','moving'].includes(detailModal.stage)" class="btn" style="border-color:#fbbf24;color:#fbbf24;" @click="stopTask(detailModal)">⏸ 暂停</button>
         <button class="btn" @click="closeDetail">关闭</button>
       </div>

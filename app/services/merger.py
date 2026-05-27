@@ -98,6 +98,48 @@ def _parse_reencode_progress(line_text: str, task_id: str):
             update_task(task_id, progress=progress, stage="merging_reencode")
 
 
+def _verify_output(output_path: Path) -> tuple[bool, str]:
+    """使用 ffprobe 验证合并后的视频文件完整性"""
+    try:
+        import json
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=codec_name,duration',
+             '-show_entries', 'format=duration,size',
+             '-of', 'json', str(output_path)],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            return False, f"ffprobe 失败: {result.stderr.strip()[:200]}"
+
+        data = json.loads(result.stdout)
+        streams = data.get('streams', [])
+        if not streams:
+            return False, "无视频流"
+
+        duration = None
+        for source in [data.get('format', {}), streams[0]]:
+            d = source.get('duration')
+            if d:
+                try:
+                    duration = float(d)
+                    if duration > 0:
+                        break
+                except (ValueError, TypeError):
+                    pass
+
+        if duration is None or duration < 1.0:
+            return False, f"视频时长异常: {duration}"
+
+        size = output_path.stat().st_size
+        if size < 1024 * 1024:
+            return False, f"文件过小: {size / 1024:.1f} KB"
+
+        return True, f"duration={duration:.1f}s, size={size / (1024*1024):.1f}MB"
+    except Exception as e:
+        return False, f"验证异常: {e}"
+
+
 def _run_ffmpeg(cmd: list, task_id: str, output_path: Path,
                 progress_parser, timeout: int = 3600) -> tuple[bool, str]:
     """运行 ffmpeg，带超时保护和实时进度解析"""
@@ -129,7 +171,15 @@ def _run_ffmpeg(cmd: list, task_id: str, output_path: Path,
     stderr_text = b''.join(stderr_lines).decode('utf-8', errors='ignore')
 
     if exit_code == 0 and output_path.exists() and output_path.stat().st_size > 0:
-        return True, str(output_path)
+        # ffmpeg 退出码为 0 且文件存在，但仍需验证文件完整性
+        logger.info(f"[merger] {task_id}: ffmpeg 退出码 0，开始验证输出文件...")
+        ok, verify_msg = _verify_output(output_path)
+        if ok:
+            logger.info(f"[merger] {task_id}: 输出文件验证通过: {verify_msg}")
+            return True, str(output_path)
+        else:
+            logger.error(f"[merger] {task_id}: 输出文件验证失败: {verify_msg}")
+            return False, f"输出文件验证失败: {verify_msg}"
     return False, stderr_text[-500:] if stderr_text else f"ffmpeg exit {exit_code}"
 
 

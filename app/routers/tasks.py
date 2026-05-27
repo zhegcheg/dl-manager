@@ -328,6 +328,31 @@ def batch_retry_tasks(body: BatchTaskRequest):
                 proc.terminate()
             unregister_download(task_id)
 
+            # 如果任务已完成，清理旧文件以确保重新下载
+            if task.get("status") == "completed":
+                for path_key in ("file", "final_path"):
+                    old_path = task.get(path_key, "")
+                    if old_path:
+                        p = Path(old_path)
+                        if p.exists():
+                            try:
+                                p.unlink()
+                            except Exception:
+                                pass
+                cfg = get_download_config()
+                temp_dir = cfg.get("temp_dir", "")
+                if temp_dir:
+                    import glob
+                    for f in glob.glob(f"{temp_dir}/{task_id}*"):
+                        try:
+                            p = Path(f)
+                            if p.is_file():
+                                p.unlink()
+                            elif p.is_dir():
+                                shutil.rmtree(p, ignore_errors=True)
+                        except Exception:
+                            pass
+
             # 如果 video_url 为空，尝试从 source_id 恢复（供下载器刷新用）
             video_url = task.get("video_url", "")
             if not video_url and task.get("source_id"):
@@ -509,7 +534,8 @@ def stop_task(task_id: str):
 
 @router.post("/api/tasks/{task_id}/retry")
 def retry_task(task_id: str):
-    """手动重试：不受次数限制，重置 retry_count=0（m3u8/key刷新由下载器启动时异步完成）"""
+    """手动重试：不受次数限制，重置 retry_count=0（m3u8/key刷新由下载器启动时异步完成）
+    支持 completed 任务重新下载（会清理旧文件）"""
     from app.services.queue import unregister_download, _running
 
     task = get_task(task_id)
@@ -520,6 +546,36 @@ def retry_task(task_id: str):
     if proc:
         proc.terminate()
     unregister_download(task_id)
+
+    # 如果任务已完成，清理旧文件以确保重新下载
+    if task.get("status") == "completed":
+        cleaned = []
+        for path_key in ("file", "final_path"):
+            old_path = task.get(path_key, "")
+            if old_path:
+                p = Path(old_path)
+                if p.exists():
+                    try:
+                        p.unlink()
+                        cleaned.append(str(p))
+                    except Exception:
+                        pass
+        if cleaned:
+            logger.info(f"[重试] {task_id}: 已清理旧文件: {cleaned}")
+        # 同时清理 temp_dir 中的残留（确保下载器不会跳过）
+        cfg = get_download_config()
+        temp_dir = cfg.get("temp_dir", "")
+        if temp_dir:
+            import glob
+            for f in glob.glob(f"{temp_dir}/{task_id}*"):
+                try:
+                    p = Path(f)
+                    if p.is_file():
+                        p.unlink()
+                    elif p.is_dir():
+                        shutil.rmtree(p, ignore_errors=True)
+                except Exception:
+                    pass
 
     # 如果 video_url 为空，尝试从 source_id 恢复（供下载器刷新用）
     video_url = task.get("video_url", "")

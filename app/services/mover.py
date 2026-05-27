@@ -60,7 +60,8 @@ def _do_copy(task_id: str, src: Path, dest: Path):
             if dest_size >= src_size:
                 src.unlink()
                 update_task(task_id, status="completed", stage="completed",
-                           progress=100, move_speed="skipped (目标更大)")
+                           progress=100, move_speed="skipped (目标更大)",
+                           final_path=str(dest))
                 return
             else:
                 dest.unlink()
@@ -100,7 +101,21 @@ def _copy_with_progress(task_id: str, src: Path, dest: Path, total_size: int, st
                        move_speed=f"{speed_mbps:.1f}MB/s",
                        move_elapsed=f"{int(elapsed)}s")
 
-    # 复制完成
+    # 复制完成，验证文件大小一致性
+    if dest.exists():
+        src_size = src.stat().st_size
+        dest_size = dest.stat().st_size
+        if src_size != dest_size:
+            update_task(task_id, error=f"转移失败: 文件大小不一致 (源 {src_size} != 目标 {dest_size})")
+            try:
+                dest.unlink()
+            except Exception:
+                pass
+            return
+    else:
+        update_task(task_id, error="转移失败: 目标文件未生成")
+        return
+
     update_task(task_id, status="completed", stage="completed",
                progress=100, move_speed="done", final_path=str(dest))
     src.unlink()
@@ -150,6 +165,21 @@ def _copy_with_pv(task_id: str, src: Path, dest: Path, total_size: int, start: f
         if dest.exists():
             dest.unlink()
         update_task(task_id, error=f"转移失败: pv exit={proc.returncode}")
+        return
+
+    # 验证文件大小一致性
+    if dest.exists():
+        src_size = src.stat().st_size
+        dest_size = dest.stat().st_size
+        if src_size != dest_size:
+            update_task(task_id, error=f"转移失败: 文件大小不一致 (源 {src_size} != 目标 {dest_size})")
+            try:
+                dest.unlink()
+            except Exception:
+                pass
+            return
+    else:
+        update_task(task_id, error="转移失败: 目标文件未生成")
         return
 
     update_task(task_id, status="completed", stage="completed",

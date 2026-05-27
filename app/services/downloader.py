@@ -233,6 +233,8 @@ def _monitor_and_postprocess(proc: subprocess.Popen, download_handle: DownloadTh
     last_log_progress = -10
     non_json_lines = 0  # 非 JSON 行计数器，用于诊断
 
+    last_progress = 0.0
+    max_progress = 0.0
     try:
         while True:
             raw_line = proc.stdout.readline()
@@ -283,6 +285,10 @@ def _monitor_and_postprocess(proc: subprocess.Popen, download_handle: DownloadTh
                         frag_cnt = 0
                     segments_str = f"{frag_idx}/{frag_cnt}" if frag_cnt > 0 else ""
 
+                    last_progress = progress
+                    if progress > max_progress:
+                        max_progress = progress
+
                     update_task(task_id, progress=progress, speed=speed_str, segments=segments_str)
 
                     if progress - last_log_progress >= 10:
@@ -301,21 +307,39 @@ def _monitor_and_postprocess(proc: subprocess.Popen, download_handle: DownloadTh
         stderr_output = proc.stderr.read() if proc.stderr else ''
 
         if proc.returncode == 0:
+            # 严格完成度检查：yt-dlp 返回 0 但进度未到达 100% 的情况（如网络中断后异常退出）
+            if max_progress > 0 and max_progress < 95.0:
+                # 进度远低于 100%，直接判定为失败（即使 ffprobe 可能通过，文件也很可能不完整）
+                err = f"下载不完整: yt-dlp 报告的最高进度仅 {max_progress:.1f}%，必须到达 ~100% 才算完成"
+                write_log(err, "ERROR")
+                update_task(task_id, status="failed", stage="failed", error=err)
+                download_handle.set_exit_code(1)
+                return
+            elif max_progress > 0 and max_progress < 99.0:
+                write_log(f"警告: yt-dlp 退出码为 0，但最高进度仅 {max_progress:.1f}%，将通过 ffprobe 验证文件完整性", "WARN")
             write_log("yt-dlp 下载完成")
             update_task(task_id, progress=100, speed="", segments="", stage="merging")
-            _post_download(task_id, download_dir, temp_dir, write_log, download_handle)
+            _post_download(task_id, download_dir, temp_dir, write_log, download_handle, max_progress=max_progress)
         elif download_handle.stop_flag.is_set():
             pass  # 已处理
         else:
             error_msg = stderr_output.strip().split('\n')[-1][:200] if stderr_output else f"yt-dlp 退出码: {proc.returncode}"
             # 检查是否有已合并的 .mp4.part 文件（yt-dlp 下载完成但 ffmpeg 合并步骤失败）
             part_file = Path(temp_dir) / f"{task_id}.mp4.part"
-            if part_file.exists() and part_file.stat().st_size > 1024 * 1024:
+            if part_file.exists() and part_file.stat().st_size > 50 * 1024 * 1024:  # 提高到 50MB
                 write_log(f"yt-dlp 退出码非 0 ({proc.returncode})，但发现 .mp4.part 文件 ({part_file.stat().st_size / (1024*1024):.1f} MB)")
                 write_log(f"原始错误: {error_msg}")
                 write_log("尝试从 .mp4.part 文件恢复...")
-                update_task(task_id, progress=100, speed="", segments="", stage="merging")
-                _post_download(task_id, download_dir, temp_dir, write_log, download_handle)
+                # 严格验证：.mp4.part 文件也必须通过 ffprobe 验证
+                ok, verify_msg = _verify_video_integrity(str(part_file))
+                if ok:
+                    write_log(f".mp4.part 文件验证通过: {verify_msg}")
+                    update_task(task_id, progress=100, speed="", segments="", stage="merging")
+                    _post_download(task_id, download_dir, temp_dir, write_log, download_handle, max_progress=max_progress)
+                else:
+                    write_log(f".mp4.part 文件验证失败: {verify_msg}，标记为下载失败", "ERROR")
+                    update_task(task_id, status="failed", stage="failed", error=f"下载失败(文件不完整): {error_msg}; 验证失败: {verify_msg}")
+                    download_handle.set_exit_code(1)
             else:
                 write_log(f"下载失败: {error_msg}", "ERROR")
                 logger.error(f"[下载] 任务 {task_id} 失败: {error_msg}")
@@ -344,7 +368,7 @@ def _monitor_and_postprocess(proc: subprocess.Popen, download_handle: DownloadTh
 
 
 def _post_download(task_id: str, download_dir: str, temp_dir: str,
-                   write_log, download_handle: DownloadThread):
+                   write_log, download_handle: DownloadThread, max_progress: float = 0):
     """下载完成后处理：查找合并文件、移动到下载目录、可选 NAS 转移"""
     # 诊断：列出 temp_dir 和 download_dir 中与当前任务相关的文件
     for dir_label, dir_path in [("temp_dir", temp_dir), ("download_dir", download_dir)]:
@@ -445,6 +469,22 @@ def _post_download(task_id: str, download_dir: str, temp_dir: str,
         download_handle.set_exit_code(1)
         return
 
+    # === 视频完整性验证：必须用 ffprobe 验证文件可正常解析 ===
+    write_log(f"开始验证视频文件完整性: {video_path.name}")
+    ok, verify_msg = _verify_video_integrity(str(video_path))
+    if ok:
+        write_log(f"视频验证通过: {verify_msg}")
+    else:
+        write_log(f"视频验证失败: {verify_msg}", "ERROR")
+        # 如果 yt-dlp 进度未到 100%，明确提示文件不完整
+        if max_progress > 0 and max_progress < 99.0:
+            err_detail = f"下载不完整(最高进度 {max_progress:.1f}%)，文件验证失败: {verify_msg}"
+        else:
+            err_detail = f"文件验证失败: {verify_msg}"
+        update_task(task_id, status="failed", stage="failed", error=err_detail)
+        download_handle.set_exit_code(1)
+        return
+
     write_log(f"视频文件就绪: {video_path.name} ({video_path.stat().st_size / (1024*1024):.2f} MB)")
     write_log(f"视频文件完整路径: {video_path}")
     write_log(f"目标下载目录: {download_dir}")
@@ -471,28 +511,52 @@ def _post_download(task_id: str, download_dir: str, temp_dir: str,
                 max_chars -= 1
             mp4_name = stem[:max_chars] + suffix
         final_mp4 = Path(download_dir) / mp4_name
-        # 防止文件名冲突
+        # 如果目标文件已存在，比较大小：谁大保留谁
         if final_mp4.exists():
-            stem = final_mp4.stem
-            suffix = final_mp4.suffix
-            counter = 1
-            while final_mp4.exists():
-                final_mp4 = Path(download_dir) / f"{stem}_{counter}{suffix}"
-                counter += 1
-        try:
-            shutil.move(str(video_path), str(final_mp4))
-            write_log(f"文件已移动到: {final_mp4}")
-        except Exception as move_err:
-            write_log(f"移动失败: {move_err}，回退到复制", "WARN")
+            existing_size = final_mp4.stat().st_size
+            new_size = video_path.stat().st_size
+            if existing_size >= new_size:
+                write_log(f"目标文件已存在且更大 ({existing_size / (1024*1024):.2f} MB >= {new_size / (1024*1024):.2f} MB)，保留已有文件，删除新文件")
+                try:
+                    video_path.unlink()
+                except Exception:
+                    pass
+                # final_mp4 保持为已有的目标文件
+            else:
+                write_log(f"目标文件已存在但更小 ({existing_size / (1024*1024):.2f} MB < {new_size / (1024*1024):.2f} MB)，删除旧文件并移动新文件")
+                try:
+                    final_mp4.unlink()
+                except Exception:
+                    pass
+                try:
+                    shutil.move(str(video_path), str(final_mp4))
+                    write_log(f"文件已移动到: {final_mp4}")
+                except Exception as move_err:
+                    write_log(f"移动失败: {move_err}，回退到复制", "WARN")
+                    try:
+                        shutil.copy2(str(video_path), str(final_mp4))
+                        video_path.unlink()
+                        write_log(f"文件已复制到: {final_mp4}")
+                    except Exception as copy_err:
+                        write_log(f"复制也失败: {copy_err}", "ERROR")
+                        # 最后手段：直接使用 temp_dir 中的文件
+                        final_mp4 = video_path
+                        write_log(f"回退使用 temp_dir 中的文件: {final_mp4}", "WARN")
+        else:
             try:
-                shutil.copy2(str(video_path), str(final_mp4))
-                video_path.unlink()
-                write_log(f"文件已复制到: {final_mp4}")
-            except Exception as copy_err:
-                write_log(f"复制也失败: {copy_err}", "ERROR")
-                # 最后手段：直接使用 temp_dir 中的文件
-                final_mp4 = video_path
-                write_log(f"回退使用 temp_dir 中的文件: {final_mp4}", "WARN")
+                shutil.move(str(video_path), str(final_mp4))
+                write_log(f"文件已移动到: {final_mp4}")
+            except Exception as move_err:
+                write_log(f"移动失败: {move_err}，回退到复制", "WARN")
+                try:
+                    shutil.copy2(str(video_path), str(final_mp4))
+                    video_path.unlink()
+                    write_log(f"文件已复制到: {final_mp4}")
+                except Exception as copy_err:
+                    write_log(f"复制也失败: {copy_err}", "ERROR")
+                    # 最后手段：直接使用 temp_dir 中的文件
+                    final_mp4 = video_path
+                    write_log(f"回退使用 temp_dir 中的文件: {final_mp4}", "WARN")
 
     # 只有当 final_mp4 不在 temp_dir 中时才清理临时文件
     if str(final_mp4.parent) != str(Path(temp_dir).resolve()):
@@ -617,9 +681,25 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
 
     if existing_video:
         write_log(f"发现已存在的视频文件: {existing_video} ({existing_video.stat().st_size / (1024*1024):.2f} MB)")
-        write_log("跳过下载，直接使用已有文件")
         logger.info(f"[下载] 任务 {task_id}: 视频已存在，跳过下载")
 
+        # === 已有文件也要验证完整性 ===
+        write_log("开始验证已有视频文件完整性...")
+        ok, verify_msg = _verify_video_integrity(str(existing_video))
+        if ok:
+            write_log(f"已有文件验证通过: {verify_msg}")
+        else:
+            write_log(f"已有文件验证失败: {verify_msg}，不跳过下载，重新下载", "WARN")
+            # 删除损坏的已有文件，继续正常下载流程
+            try:
+                existing_video.unlink()
+            except Exception:
+                pass
+            # 不返回，继续执行后面的下载逻辑
+            existing_video = None
+
+    if existing_video:
+        write_log("跳过下载，直接使用已有文件")
         # 确保文件在下载目录中
         if str(existing_video.parent) == str(Path(download_dir).resolve()):
             final_mp4 = existing_video
@@ -711,6 +791,49 @@ def start_download(task_id: str, m3u8_url: str, headers: str = "", key: str = ""
     monitor.start()
 
     return download_handle
+
+
+def _verify_video_integrity(file_path: str) -> tuple[bool, str]:
+    """使用 ffprobe 验证视频文件完整性（检查是否有有效的视频流和时长）"""
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=codec_name,duration,bit_rate',
+             '-show_entries', 'format=duration,bit_rate,size',
+             '-of', 'json', file_path],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            return False, f"ffprobe 失败: {result.stderr.strip()[:200]}"
+
+        probe_data = json.loads(result.stdout)
+        streams = probe_data.get('streams', [])
+        if not streams:
+            return False, "无视频流"
+
+        # 检查时长是否合理（> 1秒）
+        duration = None
+        for source in [probe_data.get('format', {}), streams[0]]:
+            d = source.get('duration')
+            if d:
+                try:
+                    duration = float(d)
+                    if duration > 0:
+                        break
+                except (ValueError, TypeError):
+                    pass
+
+        if duration is None or duration < 1.0:
+            return False, f"视频时长异常: {duration}"
+
+        # 检查文件大小是否合理（> 1MB）
+        size = Path(file_path).stat().st_size
+        if size < 1024 * 1024:
+            return False, f"文件过小: {size / 1024:.1f} KB"
+
+        return True, f"codec={streams[0].get('codec_name')}, duration={duration:.1f}s, size={size / (1024*1024):.1f}MB"
+    except Exception as e:
+        return False, f"验证异常: {e}"
 
 
 def _cleanup_temp(temp_dir: str, task_id: str):

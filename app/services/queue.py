@@ -331,16 +331,23 @@ def _recover_merge(tid: str, t: dict):
     ok, result = merge_ts_to_mp4(seg_dir, tid, flat)
     
     if ok and flat.exists() and flat.stat().st_size > 0:
-        update_task(tid, status="completed", stage="completed", progress=100, file=str(flat))
-        if task_dir.exists():
-            shutil.rmtree(task_dir, ignore_errors=True)
-        logger.info(f"[恢复] {tid}: 合并成功")
-        
-        # 合并后尝试转移
-        name = t.get("name", tid) or tid
-        update_task(tid, stage="moving", progress=0)
-        move_to_media_library(tid, str(flat), name + ".mp4")
-        logger.info(f"[恢复] {tid}: 启动转移")
+        # 恢复合并后也要验证文件完整性
+        from app.services.downloader import _verify_video_integrity
+        vok, vmsg = _verify_video_integrity(str(flat))
+        if vok:
+            update_task(tid, status="completed", stage="completed", progress=100, file=str(flat))
+            if task_dir.exists():
+                shutil.rmtree(task_dir, ignore_errors=True)
+            logger.info(f"[恢复] {tid}: 合并成功，验证通过: {vmsg}")
+            
+            # 合并后尝试转移
+            name = t.get("name", tid) or tid
+            update_task(tid, stage="moving", progress=0)
+            move_to_media_library(tid, str(flat), name + ".mp4")
+            logger.info(f"[恢复] {tid}: 启动转移")
+        else:
+            update_task(tid, status="failed", stage="failed", error=f"合并后文件验证失败: {vmsg}")
+            logger.error(f"[恢复] {tid}: 合并后文件验证失败 - {vmsg}")
     else:
         update_task(tid, status="failed", stage="failed", error=f"合并失败: {result}")
         logger.error(f"[恢复] {tid}: 合并失败 - {result}")

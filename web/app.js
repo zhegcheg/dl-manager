@@ -157,7 +157,7 @@ createApp({
     // 点击全选时只选择当前页的任务
     const canBatchStart = computed(() => filteredTasks.value.some(t => selected.value.includes(t.id) && (t.stage === 'waiting' || t.stage === 'stopped')))
     const canBatchStop = computed(() => filteredTasks.value.some(t => selected.value.includes(t.id) && ['downloading','merging','moving'].includes(t.stage)))
-    const canBatchRetry = computed(() => filteredTasks.value.some(t => selected.value.includes(t.id) && t.stage === 'failed'))
+    const canBatchRetry = computed(() => filteredTasks.value.some(t => selected.value.includes(t.id) && ['failed','completed'].includes(t.stage)))
 
     function toggleSelect(t) {
       const idx = selected.value.indexOf(t.id)
@@ -366,7 +366,11 @@ createApp({
     }
 
     async function retryTask(t) {
-      if (!confirm(`确定要重试任务 ${t.id}？(已重试 ${t.retry_count || 0}/3 次)`)) return
+      const isRedo = t.stage === 'completed'
+      const msg = isRedo
+        ? `确定要重新下载任务 ${t.id}？这将删除已下载的文件并重新下载。`
+        : `确定要重试任务 ${t.id}？(已重试 ${t.retry_count || 0}/3 次)`
+      if (!confirm(msg)) return
       try {
         const r = await fetch(`/api/tasks/${t.id}/retry`, {method:'POST'})
         const d = await r.json()
