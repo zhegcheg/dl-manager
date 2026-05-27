@@ -717,68 +717,69 @@ async def _resolve_with_playwright_async(video_url: str, referer: str = "") -> d
             await page.route("**/*", handle_route)
 
             logger.info(f"[playwright] navigating to {video_url}")
-            response = await page.goto(video_url, wait_until="networkidle", timeout=45000)
-            await asyncio.sleep(8)  # 等待 JS / Cloudflare 挑战完成
+            try:
+                response = await page.goto(video_url, wait_until="networkidle", timeout=45000)
+                await asyncio.sleep(8)  # 等待 JS / Cloudflare 挑战完成
 
-            page_title = await page.title()
-
-            # 若仍在 Cloudflare 挑战页，额外等待
-            if "Just a moment" in page_title or "challenge" in page.url.lower():
-                logger.info("[playwright] waiting for Cloudflare challenge...")
-                await asyncio.sleep(15)
                 page_title = await page.title()
 
-            # 方法 1: window.hlsUrl
-            hls_url = await page.evaluate("() => { try { return window.hlsUrl || ''; } catch(e) { return ''; } }")
-            if hls_url:
-                m3u8_url = hls_url
-                logger.info(f"[playwright] found m3u8 via window.hlsUrl: {m3u8_url[:80]}...")
+                # 若仍在 Cloudflare 挑战页，额外等待
+                if "Just a moment" in page_title or "challenge" in page.url.lower():
+                    logger.info("[playwright] waiting for Cloudflare challenge...")
+                    await asyncio.sleep(15)
+                    page_title = await page.title()
 
-            # 方法 2: 网络拦截
-            if not m3u8_url and intercepted_urls:
-                m3u8_url = intercepted_urls[0]
-                logger.info(f"[playwright] found m3u8 via network interception: {m3u8_url[:80]}...")
+                # 方法 1: window.hlsUrl
+                hls_url = await page.evaluate("() => { try { return window.hlsUrl || ''; } catch(e) { return ''; } }")
+                if hls_url:
+                    m3u8_url = hls_url
+                    logger.info(f"[playwright] found m3u8 via window.hlsUrl: {m3u8_url[:80]}...")
 
-            # 方法 3: 页面 HTML
-            if not m3u8_url:
-                html = await page.content()
-                matches = re.findall(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', html)
-                if matches:
-                    m3u8_url = matches[0]
-                    logger.info(f"[playwright] found m3u8 in HTML: {m3u8_url[:80]}...")
+                # 方法 2: 网络拦截
+                if not m3u8_url and intercepted_urls:
+                    m3u8_url = intercepted_urls[0]
+                    logger.info(f"[playwright] found m3u8 via network interception: {m3u8_url[:80]}...")
 
-            # 方法 4: 常见 JS 变量
-            if not m3u8_url:
-                for var_name in ("sources", "videoSources", "playerConfig", "videoUrl", "hlsUrl", "m3u8Url", "streamUrl"):
-                    result = await page.evaluate(f"() => {{ try {{ return window.{var_name} || ''; }} catch(e) {{ return ''; }} }}")
-                    if result and isinstance(result, str) and ".m3u8" in result:
-                        m3u8_url = result
-                        logger.info(f"[playwright] found m3u8 via window.{var_name}: {m3u8_url[:80]}...")
-                        break
-                    elif result and isinstance(result, list):
-                        for src in result:
-                            if isinstance(src, dict) and src.get("file") and ".m3u8" in src["file"]:
-                                m3u8_url = src["file"]
-                                logger.info(f"[playwright] found m3u8 via window.{var_name}[].file: {m3u8_url[:80]}...")
-                                break
-                            elif isinstance(src, str) and ".m3u8" in src:
-                                m3u8_url = src
-                                logger.info(f"[playwright] found m3u8 via window.{var_name}[]: {m3u8_url[:80]}...")
-                                break
-                        if m3u8_url:
+                # 方法 3: 页面 HTML
+                if not m3u8_url:
+                    html = await page.content()
+                    matches = re.findall(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', html)
+                    if matches:
+                        m3u8_url = matches[0]
+                        logger.info(f"[playwright] found m3u8 in HTML: {m3u8_url[:80]}...")
+
+                # 方法 4: 常见 JS 变量
+                if not m3u8_url:
+                    for var_name in ("sources", "videoSources", "playerConfig", "videoUrl", "hlsUrl", "m3u8Url", "streamUrl"):
+                        result = await page.evaluate(f"() => {{ try {{ return window.{var_name} || ''; }} catch(e) {{ return ''; }} }}")
+                        if result and isinstance(result, str) and ".m3u8" in result:
+                            m3u8_url = result
+                            logger.info(f"[playwright] found m3u8 via window.{var_name}: {m3u8_url[:80]}...")
                             break
+                        elif result and isinstance(result, list):
+                            for src in result:
+                                if isinstance(src, dict) and src.get("file") and ".m3u8" in src["file"]:
+                                    m3u8_url = src["file"]
+                                    logger.info(f"[playwright] found m3u8 via window.{var_name}[].file: {m3u8_url[:80]}...")
+                                    break
+                                elif isinstance(src, str) and ".m3u8" in src:
+                                    m3u8_url = src
+                                    logger.info(f"[playwright] found m3u8 via window.{var_name}[]: {m3u8_url[:80]}...")
+                                    break
+                            if m3u8_url:
+                                break
 
-            # 方法 5: video 标签
-            if not m3u8_url:
-                video_elements = await page.query_selector_all("video")
-                for video in video_elements:
-                    src = await video.get_attribute("src")
-                    if src and ".m3u8" in src:
-                        m3u8_url = src
-                        logger.info(f"[playwright] found m3u8 via video tag: {m3u8_url[:80]}...")
-                        break
-
-            await browser.close()
+                # 方法 5: video 标签
+                if not m3u8_url:
+                    video_elements = await page.query_selector_all("video")
+                    for video in video_elements:
+                        src = await video.get_attribute("src")
+                        if src and ".m3u8" in src:
+                            m3u8_url = src
+                            logger.info(f"[playwright] found m3u8 via video tag: {m3u8_url[:80]}...")
+                            break
+            finally:
+                await browser.close()
 
     except Exception as e:
         logger.warning(f"[playwright] error resolving {video_url}: {e}")

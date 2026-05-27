@@ -583,7 +583,7 @@ createApp({
     async function doAddVideo() {
       if (!canAddVideo.value) return
       adding.value = true
-      addMsg.value = ''
+      addMsg.value = '正在解析视频页面，请稍候...（可能需要 10-20 秒）'
       try {
         let r
         if (addMode.value === 'url') {

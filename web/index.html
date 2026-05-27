@@ -336,11 +336,17 @@
         <label>下载目录 <span style="color:#888;font-size:12px;">(留空使用全局设置)</span></label>
         <input type="text" v-model="addDownloadDir" placeholder="">
       </div>
+      <!-- 加载提示 -->
+      <div v-if="adding" class="form-group" style="display:flex;align-items:center;gap:10px;color:#60a5fa;">
+        <span class="spinner"></span>
+        <span>[[ addMsg ]]</span>
+      </div>
+      <div v-else-if="addMsg" class="form-group" :class="addMsg.indexOf('失败')>=0?'error':'success'">[[ addMsg ]]</div>
+
       <div class="modal-actions">
-        <button class="btn sm" @click="showAddModal=false">取消</button>
+        <button class="btn sm" @click="showAddModal=false" :disabled="adding">取消</button>
         <button class="btn sm" :disabled="!canAddVideo || adding" @click="doAddVideo" style="border-color:#ff6b9d;color:#ff6b9d;">[[ adding ? '添加中...' : '添加' ]]</button>
       </div>
-      <div v-if="addMsg" class="form-group" :class="addMsg.indexOf('失败')>=0?'error':'success'">[[ addMsg ]]</div>
     </div>
   </div>
 

@@ -370,6 +370,20 @@
   border-color: #ff8db8;
 }
 
+/* Spinner 加载动画 */
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid #333;
+  border-top-color: #60a5fa;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 /* 响应式布局 */
 @media (max-width: 900px) {
   .settings-grid {
